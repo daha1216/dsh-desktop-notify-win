@@ -1,0 +1,60 @@
+{
+  "name": "dsh-desktop-notify-win",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Windows desktop notifications for DeepSeek Harness: idle, approval, question and error alerts, with a settings page, live preview and presets.",
+  "license": "MIT",
+  "author": "xiaotie3088",
+  "homepage": "https://github.com/xiaotie3088/dsh-desktop-notify-win",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaotie3088/dsh-desktop-notify-win.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaotie3088/dsh-desktop-notify-win/issues"
+  },
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "desktop-notification",
+    "windows",
+    "toast",
+    "notification"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "notify.ps1",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings"]
+    }
+  }
+}

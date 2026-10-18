@@ -1,0 +1,9 @@
+- insert:
+    - id: desktop-notify
+      name: dsh-desktop-notify-win
+      config:
+        onTurnEnd: true
+        onQuestion: true
+        onApproval: true
+        onError: true
+        onStartup: false

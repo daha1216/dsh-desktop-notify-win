@@ -1,0 +1,21 @@
+# 本地状态，不入库
+.scratch/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+__pycache__/
+.venv/
+
+# 本机配置（设置页保存后生成），不随仓库发布
+settings.json
+
+# 运行时日志：含窗口标题、会话标题、本机路径，不要发布
+notify-debug.log
+notify-click.log
+*.log
+
+# 系统杂项
+.DS_Store
+Thumbs.db
