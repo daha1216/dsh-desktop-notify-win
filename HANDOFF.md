@@ -1,11 +1,11 @@
-# dsh-desktop-notify-win 定制版 · BUILD 20 交接文档
+# dsh-desktop-notify-win 定制版 · BUILD 21 交接文档
 
 最后更新：2026-11-11
 代码位置：D:\dsh work\dsh-desktop-notify-win
 发布仓库：https://github.com/daha1216/dsh-desktop-notify-win
 上游：https://github.com/xiaotie3088/dsh-desktop-notify-win
 
-本文描述 BUILD 20（版本 0.5.1，含常驻宿主关闭定时器修复）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 20 的代码修正了几处旧结论。
+本文描述 BUILD 21（版本 0.5.2，含通知文案摘要与常驻宿主关闭定时器修复）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 21 的代码修正了几处旧结论。
 
 ---
 
@@ -15,17 +15,18 @@
 
 BUILD 20 的核心变化：
 
-- host 端从单文件拆成 index.js + lib/ 七个模块，通知编排、配置、历史、日志、路径、渲染宿主各自独立。
+- host 端从单文件拆成 index.js + lib/ 八个模块，通知编排、文案摘要、配置、历史、日志、路径、渲染宿主各自独立。
 - notify.ps1 新增 -Serve 常驻宿主模式：第一张卡片出现时启动一个 powershell.exe，之后所有卡片复用；连续失败才回退到每次一个短命进程。
 - 设置页重写为六段式：通知什么 / 什么时候不打扰 / 样式 / 最近通知 / 数据与维护 / 实时预览。
 - 新增五类事件开关、免打扰时段、前台 / 全屏 / 专注助手抑制、最多同屏、显示器选择、点击行为、历史 50 条与抑制原因、预览与重播、导入导出、恢复默认。
 - 配置和历史搬到数据目录（默认 %USERPROFILE%\.dsh\desktop-notify），首次运行会从插件目录的旧 settings.json 迁移。
 - 八套预设、三种版式保留；dsh 白卡仍按参考图逐像素复刻，但颜色、圆角、高光、缩放已经统一走通用卡片路径。
 - 修复了旧版若干行为不一致：事件关闭也写历史、maxVisible 实际是淘汰最早而不是排队、所有事件到点自动收起、状态行/应用名的长度上限与服务端对齐。
+- BUILD 21 把通知正文接到真实任务上：turnEnd 取最后一轮 assistant 文本的第一句（最多 120 字），question 取请求里的 header + question；approval/error 不变。
 
 当前状态：
 
-- 代码与静态测试在 BUILD 20 工作副本里完成；发布和安装状态请看 8.6 的清单，以远端 commit 和 profile 里的 package.json 为准。
+- 代码与静态测试在 BUILD 21 工作副本里完成；发布和安装状态请看 8.7 的清单，以远端 commit 和 profile 里的 package.json 为准。
 - 工作副本本身不是 git 仓库；发布依靠复制进 fork 的克隆再提交。
 - 没有构建步骤。index.js / client.js / lib/*.js 直接是 ESM 源码，notify.ps1 直接由 powershell.exe 执行。
 
@@ -199,21 +200,22 @@ dsh 的底色、文字色、圆角、高光、阴影都走通用卡片路径，�
 
 ## 3. 代码地图
 
-### 3.1 index.js（317 行）
+### 3.1 index.js（332 行）
 
 host 插件入口，inject 为 webServer + connection。
 
 | 区域 | 行 | 作用 |
 |---|---|---|
-| 导入与常量 | 1-24 | schema/paths/config/history/log/renderer-host/service；API_PREFIX、MAX_BODY、WATCHER_KEY |
-| sendJson / rejectionOf / readBody | 26-55 | JSON 响应、connection.requestRejection 鉴权、64KB 请求体上限 |
-| sessionTitleOf / isRootAgent / errorMessage | 57-97 | 会话标题、根 agent 判断、错误文案 |
-| ensureApprovalWatcher | 102-129 | root.on('session/event') 监听 approval/asked，工具名兼容 data.toolName 与 toolName，1500ms 去重；全局单例，插件重载不断监听 |
-| apply 初始化 | 131-167 | resolvePaths → createLogger → SettingsStore.load → HistoryStore → getRendererHost → NotificationService |
-| pickPreviewAgent | 139-159 | 给测试/重播找一个可用的 agent 上下文 |
-| 事件接线 | 169-215 | agent/status（idle + root）触发 turnEnd 250ms 去抖；agent/error；user-questions/request（prepend）先弹 question 再 next；watcher.dispatch 弹 approval |
-| HTTP 路由 | 217-295 | 见 5.4 |
-| startup timer / cleanup / apply 日志 | 297-316 | onStartup 时 800ms 后弹 startup；dispose 时清 timer、解除 dispatch、dispose service、resetRendererHost |
+| 导入与常量 | 1-24 | schema/paths/config/history/log/renderer-host/service/summary；API_PREFIX、MAX_BODY、WATCHER_KEY |
+| sendJson / rejectionOf / readBody | 26-56 | JSON 响应、connection.requestRejection 鉴权、64KB 请求体上限 |
+| sessionTitleOf / withTitle / assistantSummaryOf | 58-89 | 会话标题、通知 agent 上下文、取本轮最后一轮 assistant 摘要 |
+| isRootAgent / errorMessage | 91-109 | 根 agent 判断、错误文案（截 160 字） |
+| ensureApprovalWatcher | 111-141 | root.on('session/event') 监听 approval/asked，工具名兼容 data.toolName 与 toolName，1500ms 去重；全局单例，插件重载不断监听 |
+| apply 初始化 | 143-186 | resolvePaths → createLogger → SettingsStore.load → HistoryStore → getRendererHost → NotificationService |
+| pickPreviewAgent | 151-171 | 给测试/重播找一个可用的 agent 上下文 |
+| 事件接线 | 188-230 | agent/status（idle + root）触发 turnEnd 250ms 去抖并传摘要；agent/error；user-questions/request（prepend）先弹 question（带实际问题）再 next；watcher.dispatch 弹 approval |
+| HTTP 路由 | 232-310 | 见 5.4 |
+| startup timer / cleanup / apply 日志 | 312-331 | onStartup 时 800ms 后弹 startup；dispose 时清 timer、解除 dispatch、dispose service、resetRendererHost |
 
 注意两点：
 
@@ -225,6 +227,7 @@ host 插件入口，inject 为 webServer + connection。
 | 文件 | 行数 | 职责 |
 |---|---|---|
 | lib/schema.js | 300 | VERSION/BUILD、43 个 DEFAULTS、LIMITS、FONTS、EVENTS、SEMANTIC_ACCENTS、8 个 PRESETS、sanitize、isQuietHours、eventEnabled、accentForEvent |
+| lib/summary.js | 85 | assistantSummary（最后一轮 assistant 文本）、questionSummary、cleanInline、clip、firstSentence |
 | lib/service.js | 229 | NotificationService：compose、抑制、合并、payload 组装、历史、预览、重播、turnEnd 去抖 |
 | lib/renderer-host.js | 296 | 常驻 notify.ps1 -Serve 宿主管理、StringDecoder 行解析、请求超时、重启上限、一次性回退 |
 | lib/config.js | 68 | SettingsStore：data → package 迁移 → defaults，sanitize 后原子写 |
@@ -615,7 +618,7 @@ PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 
 部署到 desktop profile 后，逐项确认：
 
-1. 设置页出现“桌面通知”，标题显示 v0.5.1 · BUILD 20 和 dataDir。
+1. 设置页出现“桌面通知”，标题显示 v0.5.2 · BUILD 21 和 dataDir。
 2. 六个分段都在；展开外观细节能看到 corner、marginX、marginY、色条宽度。
 3. 切换三种版式，右侧预览跟着变；dsh 预览有鲸鱼、DeepSeek Harness、状态行。
 4. 点测试通知，真实卡片出现；点保存后改一个颜色，再测试，颜色变化。
@@ -642,7 +645,7 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 整体缩放 scale（0.5-1.5），DPI 改为 Per-Monitor V2，预览防裁切，dsh 几何乘 scale。实测 70%/100%/130% 的尺寸与预期一致。设置页仍为旧版单列分区，index/client 仍是单文件。
 
-### 8.4 BUILD 20（当前，0.5.1）
+### 8.4 BUILD 20（0.5.1）
 
 架构：
 
@@ -687,7 +690,30 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 - 修法：OnFormClosed 里停止 uiTimer 和 keepTimer；keepTimer 回调先判断 IsDisposed / IsHandleCreated，并吞掉 ObjectDisposedException。
 - 回归：_bn20/test-host-timer.mjs，show 3 秒 → dismissed(timeout) → 等 2.5 秒 → ping → pong → quit，exit 0（6272ms）。旧实现在关闭后约 1 秒弹异常，收不到 pong。
 
-### 8.5 client.js 截断事故（重要教训）
+### 8.5 BUILD 21（当前，0.5.2）
+
+问题：通知正文与具体任务无关。turnEnd 永远是固定文案“会话已空闲，切回去看看。”，question 永远是“Agent 在等你的回答。”，只能看出是哪个会话、哪类事件。
+
+实现：
+
+- 新增 `lib/summary.js`。`assistantSummary(session, max=120)` 从 `session.seq-1` 向前最多 600 个事件，先找最后一个 `turn/end` 的 turn，再找同一 turn 的最后一条 `assistant/message` 的 `text` 块；`cleanInline` 去 Markdown、代码块、链接和 HTML 标签，`firstSentence` 取第一句（不足 8 字则保留整段），`clip` 截到 120 字加省略号。
+- `questionSummary(request, max=140)` 取 `request.questions[0]`，把 `header` 和 `question` 用“：”拼起来，做同样的清洗和截断。
+- `index.js` 新增 `assistantSummaryOf(ctx, agent)`：用 `ctx.get('sessions').get(id)` 取 Session；`agent/status` 为 idle 且是根 agent 时，把摘要传给 `service.scheduleTurnEnd(agent, message)`；`user-questions/request` 把 `questionSummary(request)` 传给 `service.notify('question', { message })`。
+- `lib/service.js` 的 `scheduleTurnEnd` 接受 `message`，250ms 后调用 `notify('turnEnd', { agent, message })`；`compose` 原来就只在 message 非空时替换正文，所以不需要改文案表。
+- `package.json` 的 check 增加 `lib/summary.js`；`lib/schema.js` 升到 0.5.2 / BUILD 21。
+
+验证：
+
+- `D:\dsh work\_bn21\test-summary.mjs`：fake session 验证只取本轮、跳过 tool-call、去 Markdown、截断、question 拼接；用真实会话日志 session-54dd088f 的最后一个 turn/end（turn 11）跑出“匹配不上。准确地说，目前只做到……”（该轮实际结论），exit 0。
+- `npm run check` exit 0。
+- 部署后看历史记录：真实 turnEnd 的 body 应该是本轮摘要，question 的 body 应该是实际问题。
+
+已知边界：
+
+- 摘要只取最后一条有文本的 assistant 消息；如果该轮以工具调用结束且没有文本，会回退到更早的文本。
+- 超过 120 字的文本会被截断，Markdown 结构丢失；只用于通知，不替代会话记录。
+
+### 8.6 client.js 截断事故（重要教训）
 
 2026-11-11 白天，client.js 曾被写坏：文件在“同时最多显示”那一行截断，尾部 272 行丢失。原因是之前用 read 工具的分页显示结果重建大文件；read 在 2000 字符处截断了 WHALE_PATH 的长字符串，还在字符串里嵌入了字面的 “.... (line truncated to 2000 chars)”。
 
@@ -702,18 +728,18 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 教训：不要用 read 的分页显示结果重建大文件。需要恢复时，从会话日志里取 write 调用的完整参数，或者用备份；写回后必须跑 node --check 和渲染测试。
 
-### 8.6 发布与部署清单
+### 8.7 发布与部署清单
 
 当前工作副本不是 git 仓库；发布方式是 fork 上游后覆盖上传。推荐流程：
 
 1. 在 fork daha1216/dsh-desktop-notify-win 的克隆目录里，保留上游的 .gitignore、AGENTS.md、docs/agents 等治理文件。
 2. 用工作副本覆盖源码与文档：index.js、client.js、notify.ps1、package.json、README.md、HANDOFF.md、cordis.patch.yml、icon.svg、LICENSE、locale/*.json、lib/*.js。
 3. 不要带 settings.json、notify.log、notify-click.log、client.js.bak-*、node_modules。
-4. git add -A，commit 说明写 BUILD 20：常驻宿主、设置页重写、五类事件、历史与抑制。
+4. git add -A，commit 说明写 BUILD 21：通知文案摘要、常驻宿主、设置页重写、五类事件、历史与抑制。
 5. git push origin main。
-6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.1、BUILD=20。
+6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.2、BUILD=21。
 7. 在 DSH 里更新插件，或执行 dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win。更新后刷新页面。
-8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.1，notify.ps1 是修复后的 BUILD 20 版本；检查日志里 apply 的 version/build/layout/dataDir。
+8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.2，notify.ps1 是修复后的 BUILD 21 版本；检查日志里 apply 的 version/build/layout/dataDir。
 9. 按 7.5 做真机验证。
 10. 回滚方案：把 fork 的 main 指回上一个 commit，重新安装；数据目录保留，配置不会丢。
 
@@ -795,12 +821,12 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 按优先级：
 
-1. 真机 UI 验证（7.5）：这是 BUILD 20 唯一还没有完整走完的环节。静态渲染、路由、模块测试都过了，但设置页在真实 DSH 宿主里的加载、保存、历史、抑制还需要点一遍。
+1. BUILD 21 部署后按 7.5 复验设置页、三版式和保存；0.5.1 的三版式 / 保存 / 历史 / 重播 / 前台抑制已在 2026-11-12 验证过，这次重点看通知正文是否为本轮摘要。
 2. 决定 dsh footer 的产品语义（9.1）。这是唯一一个“看起来像 bug、实际是设计选择”的点，建议先问用户要状态文案还是要倒计时，再改。
 3. 如果用户要“被替换”也进历史，有两个方案：在宿主 dismissed 回调里通知 service 回写；或者记录 shown 后允许后续 update。当前 renderer-host 只把 dismissed 当事件日志，没有回传 service。
 4. 多显示器实机测试（9.8）。
-5. 如果要把测试长期留在仓库，可以把 _bn20 的四个脚本整理成 tests/ 并加 npm script；注意它们依赖假 React、假 ModuleLoader，和真实 client 运行时不完全一样。
-6. README 的“红点”措辞同步成“彩色状态点”；如果改了 9.1，FAQ 也要改。
+5. 把 _bn21 的 summary 测试整理进 tests/ 并加 npm script；它只依赖 Node 和一个真实会话日志样本，不依赖假 React。旧的 _bn20 临时脚本已清理。
+6. README 的“红点”措辞已同步成“彩色状态点”；如果改了 9.1，FAQ 也要改。
 
 ---
 

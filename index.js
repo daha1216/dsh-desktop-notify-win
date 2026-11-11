@@ -15,6 +15,7 @@ import { HistoryStore } from './lib/history.js'
 import { createLogger, serializeError } from './lib/log.js'
 import { getRendererHost, resetRendererHost } from './lib/renderer-host.js'
 import { NotificationService } from './lib/service.js'
+import { assistantSummary, questionSummary } from './lib/summary.js'
 
 export const name = 'desktop-notify'
 export const inject = ['webServer', 'connection']
@@ -74,6 +75,17 @@ function sessionTitleOf(ctx, agent) {
 
 function withTitle(ctx, agent) {
   return { id: agent?.id, sessionTitle: sessionTitleOf(ctx, agent) }
+}
+
+function assistantSummaryOf(ctx, agent) {
+  try {
+    const id = agent?.id
+    if (!id) return ''
+    const session = ctx.get('sessions')?.get?.(id)
+    return session ? assistantSummary(session) : ''
+  } catch {
+    return ''
+  }
 }
 
 function isRootAgent(ctx, agent) {
@@ -177,7 +189,7 @@ export function apply(ctx, rawConfig = {}) {
     try {
       if (payload?.status !== 'idle') return
       if (!isRootAgent(ctx, payload?.agent)) return
-      service.scheduleTurnEnd(withTitle(ctx, payload.agent))
+      service.scheduleTurnEnd(withTitle(ctx, payload.agent), assistantSummaryOf(ctx, payload.agent))
     } catch (error) {
       log({ evt: 'status-error', message: serializeError(error) })
     }
@@ -197,7 +209,10 @@ export function apply(ctx, rawConfig = {}) {
     'user-questions/request',
     async (request, next) => {
       try {
-        service.notify('question', { agent: withTitle(ctx, request?.agent) })
+        service.notify('question', {
+          agent: withTitle(ctx, request?.agent),
+          message: questionSummary(request) || undefined,
+        })
       } catch (error) {
         log({ evt: 'question-error', message: serializeError(error) })
       }

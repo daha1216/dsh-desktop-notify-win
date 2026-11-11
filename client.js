@@ -1164,8 +1164,8 @@ window.__ModuleLoader__.load({
         { key: 'onStartup', event: 'startup', label: '插件启动', desc: 'DSH 启动或插件重载后弹一条' },
       ])
       const fonts = (meta && Array.isArray(meta.fonts) && meta.fonts.length ? meta.fonts : FONTS)
-      const version = (meta && meta.version) || config.version || '0.5.1'
-      const build = (meta && meta.build) || config.build || 20
+      const version = (meta && meta.version) || config.version || '0.5.2'
+      const build = (meta && meta.build) || config.build || 21
       const layout = settings.layout
       const isDsh = layout === 'dsh'
       const isCard = layout === 'card'

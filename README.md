@@ -2,7 +2,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的 Windows 桌面通知插件：**本轮完成、需要你回答、需要授权、agent 出错、插件就绪**时，在屏幕角落弹一张卡片。点一下卡片就切回 DSH 所在的虚拟桌面并聚焦。
 
-这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 20，版本 0.5.1），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
+这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 21，版本 0.5.2），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
 
 - 适用于 Windows 10/11 上的 DSH 桌面版 / Web GUI
 - 纯本地运行，不联网、不收集数据
@@ -19,6 +19,7 @@
 | 插件启动就绪 | `startup` | 关 |
 
 - **五类事件都能单独开关**。关掉的事件不弹窗，但仍会写入「最近通知」，并注明「事件已关闭」。
+- **正文带具体内容**：本轮完成取这一轮最后一条回复的第一句（最多 120 字），需要回答时直接显示实际问题，不再只是「会话已空闲」这类固定文案。
 - **免打扰时段**：可以设一个起止时间（支持跨午夜），期间只记历史不弹窗。
 - **不打扰正在干活的你**：DSH 在前台、全屏应用 / 系统勿扰（Windows 通知状态 2/3/4/7）、专注助手（状态 6）都可以分别抑制。被抑制的通知会保留在历史里，写明原因。
 - **最多同屏几张**：1–5 张，超出的直接关掉最早一张（不是排队）。
@@ -173,6 +174,7 @@ dsh plugin --profile desktop rm dsh-desktop-notify-win
 
 - `index.js`：host 插件入口，事件监听、HTTP API、设置持久化、审批 watcher。
 - `lib/schema.js`：默认值、限制、预设、事件与语义色、`sanitize()`。
+- `lib/summary.js`：从会话事件里取本轮最后一条回复、从提问请求里取实际问题，生成通知正文。
 - `lib/service.js`：通知编排（compose / 抑制 / 合并 / 历史 / 预览 / 重播）。
 - `lib/renderer-host.js`：常驻 `notify.ps1 -Serve` 宿主的管理与一次性回退。
 - `lib/config.js` / `lib/history.js` / `lib/log.js` / `lib/paths.js`：设置、历史、日志、路径。
@@ -196,9 +198,10 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 
 ## 本地改造记录
 
-基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 20（0.5.1）的主要改动：
+基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 21（0.5.2）的主要改动：
 
-- **拆分模块**：原来的单文件 host 拆成 `index.js` + `lib/`（schema / service / config / history / log / paths / renderer-host），渲染与调度分离。
+- **通知文案贴合任务**：新增 `lib/summary.js`，本轮完成时从会话事件里取最后一轮 assistant 回复的第一句，需要回答时直接取请求里的 `header` + `question`；只用于通知正文，不改变会话记录。
+- **拆分模块**：原来的单文件 host 拆成 `index.js` + `lib/`（schema / summary / service / config / history / log / paths / renderer-host），渲染与调度分离。
 - **常驻渲染宿主**：`notify.ps1` 新增 `-Serve` 模式，通过 stdin/stdout 的 JSON 行协议常驻，支持 `show` / `clear` / `quit` / `ping`，卡片消失、点击都会回报事件；启动失败自动回退到一次性弹窗。
 - **通知调度**：五类事件开关、免打扰时段、前台 / 全屏 / 专注助手抑制、1500ms 同 key 合并、最多同屏、历史记录与抑制原因、预览与重播。
 - **设置页重写**：六段式布局 + 固定实时预览 + 数据目录 / 导入导出 / 恢复默认 + WCAG 对比度提示。
@@ -206,7 +209,8 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 - **自绘渲染**：分层窗口 + `UpdateLayeredWindow` 手绘，圆角、同心层投影、渐变强调条、顶部高光、淡入淡出；高度随正文行数自适应；按显示器 DPI × 整体缩放绘制。
 - **DSH 白卡**：图标板 + 手绘鲸鱼、`Segoe UI Semibold` 应用名、字号按 `titleSize` / `bodySize` 固定倍率派生（1.60 / 1.385）、正文行距 1.69、双层差分描边（上左 2px、下右 1px）、彩色状态点 + 「点击切回 ›」、右上 × 独立热区；配色由底色与文字色混合派生，浅色底补一点冷色。
 - **调试**：`notify.ps1 -Snapshot <path>` 直接把静态帧写成 PNG。
-- **0.5.1 修复**：常驻宿主下通知关闭后，1000ms 的 KeepTop 定时器仍会访问已释放的窗体，触发 .NET 未处理异常（对象名 DshToast）。现在窗体关闭时停止 uiTimer / keepTimer，并在 KeepTop 回调里先检查 IsDisposed，配套回归测试 `_bn20/test-host-timer.mjs` 已通过。
+- **0.5.1 修复**：常驻宿主下通知关闭后，1000ms 的 KeepTop 定时器仍会访问已释放的窗体，触发 .NET 未处理异常（对象名 DshToast）。现在窗体关闭时停止 uiTimer / keepTimer，并在 KeepTop 回调里先检查 IsDisposed；配套回归测试当时已通过（临时目录已清理）。
+- **0.5.2 文案**：turnEnd 和 question 的正文改为真实任务内容，摘要逻辑与边界见 HANDOFF 8.5。
 
 ## 许可证
 
