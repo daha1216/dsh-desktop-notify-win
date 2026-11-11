@@ -5,7 +5,7 @@
 发布仓库：https://github.com/daha1216/dsh-desktop-notify-win
 上游：https://github.com/xiaotie3088/dsh-desktop-notify-win
 
-本文描述 BUILD 20（版本 0.5.0）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 20 的代码修正了几处旧结论。
+本文描述 BUILD 20（版本 0.5.1，含常驻宿主关闭定时器修复）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 20 的代码修正了几处旧结论。
 
 ---
 
@@ -609,13 +609,13 @@ PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 
 ### 7.4 宿主协议冒烟
 
-用 Node 启动工作副本的 notify.ps1 -Serve，发送一行 show，读取 ready→shown，再发 quit，检查 dismissed/bye。测试脚本 test-host.mjs 曾验证过这条路径（exit 0，约 3 秒）。如果要重新写，关键点是：spawn 时 stdio 全 pipe，stderr 也读走避免阻塞；show 的 id 自己生成；收到 shown 后发 quit；退出码应为 0。
+用 Node 启动工作副本的 notify.ps1 -Serve，发送一行 show，读取 ready→shown，再发 quit，检查 dismissed/bye。测试脚本 test-host.mjs 曾验证过这条路径（exit 0，约 3 秒）。0.5.1 另加了 test-host-timer.mjs：让卡片 3 秒超时消失，再等 2.5 秒发 ping，必须收到 pong；旧版会在关闭后约 1 秒触发 KeepTop 访问已释放窗体，测试会挂住或退出异常。重写时关键点是：spawn 时 stdio 全 pipe，stderr 也读走避免阻塞；show 的 id 自己生成；收到 shown 后发 quit；退出码应为 0。
 
 ### 7.5 真机 UI 验证清单
 
 部署到 desktop profile 后，逐项确认：
 
-1. 设置页出现“桌面通知”，标题显示 v0.5.0 · BUILD 20 和 dataDir。
+1. 设置页出现“桌面通知”，标题显示 v0.5.1 · BUILD 20 和 dataDir。
 2. 六个分段都在；展开外观细节能看到 corner、marginX、marginY、色条宽度。
 3. 切换三种版式，右侧预览跟着变；dsh 预览有鲸鱼、DeepSeek Harness、状态行。
 4. 点测试通知，真实卡片出现；点保存后改一个颜色，再测试，颜色变化。
@@ -642,7 +642,7 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 整体缩放 scale（0.5-1.5），DPI 改为 Per-Monitor V2，预览防裁切，dsh 几何乘 scale。实测 70%/100%/130% 的尺寸与预期一致。设置页仍为旧版单列分区，index/client 仍是单文件。
 
-### 8.4 BUILD 20（当前）
+### 8.4 BUILD 20（当前，0.5.1）
 
 架构：
 
@@ -677,8 +677,15 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 文档与打包：
 
 - README 重写为 BUILD 20。
-- package.json version 0.5.0，homepage/repository/bugs 指向 fork，files 加 lib/*.js，check 覆盖 9 个文件。
+- package.json version 0.5.1，homepage/repository/bugs 指向 fork，files 加 lib/*.js，check 覆盖 9 个文件。
 - 本 HANDOFF 重写；2.x 的几何/配色/缩放保留并修正。
+
+0.5.1 修复：
+
+- 现象：真实 dsh 测试通知自动关闭后，宿主弹出 .NET 未处理异常“无法访问已释放的对象。对象名：DshToast”。
+- 根因：DshToast 的 1000ms KeepTop 定时器在窗体 Close 后没有停止，下一次 Tick 调用 DshActions.KeepTop(Handle) 时访问已释放的 Form。BUILD 19 的短命进程掩盖了它，常驻宿主暴露。
+- 修法：OnFormClosed 里停止 uiTimer 和 keepTimer；keepTimer 回调先判断 IsDisposed / IsHandleCreated，并吞掉 ObjectDisposedException。
+- 回归：_bn20/test-host-timer.mjs，show 3 秒 → dismissed(timeout) → 等 2.5 秒 → ping → pong → quit，exit 0（6272ms）。旧实现在关闭后约 1 秒弹异常，收不到 pong。
 
 ### 8.5 client.js 截断事故（重要教训）
 
@@ -704,9 +711,9 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 3. 不要带 settings.json、notify.log、notify-click.log、client.js.bak-*、node_modules。
 4. git add -A，commit 说明写 BUILD 20：常驻宿主、设置页重写、五类事件、历史与抑制。
 5. git push origin main。
-6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.0、BUILD=20。
+6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.1、BUILD=20。
 7. 在 DSH 里更新插件，或执行 dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win。更新后刷新页面。
-8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.0，notify.ps1 是 80090 B 左右的 BUILD 20 版本；检查日志里 apply 的 version/build/layout/dataDir。
+8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.1，notify.ps1 是修复后的 BUILD 20 版本；检查日志里 apply 的 version/build/layout/dataDir。
 9. 按 7.5 做真机验证。
 10. 回滚方案：把 fork 的 main 指回上一个 commit，重新安装；数据目录保留，配置不会丢。
 

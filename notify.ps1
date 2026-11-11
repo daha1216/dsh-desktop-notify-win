@@ -627,7 +627,11 @@ public class DshToast : Form
         uiTimer = new System.Windows.Forms.Timer { Interval = 40 };
         uiTimer.Tick += OnTick;
         keepTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-        keepTimer.Tick += (s, e) => DshActions.KeepTop(Handle);
+        keepTimer.Tick += (s, e) =>
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { DshActions.KeepTop(Handle); } catch (ObjectDisposedException) { }
+        };
 
         clock = new Stopwatch();
         MouseEnter += (s, e) => { if (!paused) { paused = true; pauseStarted = clock.ElapsedMilliseconds; } };
@@ -1500,6 +1504,13 @@ public class DshToast : Form
             try { Render(currentAlpha * opacity); }
             catch (Exception ex) { DshActions.Log("render-error " + ex.Message); }
         }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        try { uiTimer.Stop(); } catch { }
+        try { keepTimer.Stop(); } catch { }
+        base.OnFormClosed(e);
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }

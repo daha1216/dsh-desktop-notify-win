@@ -2,7 +2,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的 Windows 桌面通知插件：**本轮完成、需要你回答、需要授权、agent 出错、插件就绪**时，在屏幕角落弹一张卡片。点一下卡片就切回 DSH 所在的虚拟桌面并聚焦。
 
-这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 20，版本 0.5.0），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
+这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 20，版本 0.5.1），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
 
 - 适用于 Windows 10/11 上的 DSH 桌面版 / Web GUI
 - 纯本地运行，不联网、不收集数据
@@ -196,7 +196,7 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 
 ## 本地改造记录
 
-基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 20 的主要改动：
+基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 20（0.5.1）的主要改动：
 
 - **拆分模块**：原来的单文件 host 拆成 `index.js` + `lib/`（schema / service / config / history / log / paths / renderer-host），渲染与调度分离。
 - **常驻渲染宿主**：`notify.ps1` 新增 `-Serve` 模式，通过 stdin/stdout 的 JSON 行协议常驻，支持 `show` / `clear` / `quit` / `ping`，卡片消失、点击都会回报事件；启动失败自动回退到一次性弹窗。
@@ -206,6 +206,7 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 - **自绘渲染**：分层窗口 + `UpdateLayeredWindow` 手绘，圆角、同心层投影、渐变强调条、顶部高光、淡入淡出；高度随正文行数自适应；按显示器 DPI × 整体缩放绘制。
 - **DSH 白卡**：图标板 + 手绘鲸鱼、`Segoe UI Semibold` 应用名、字号按 `titleSize` / `bodySize` 固定倍率派生（1.60 / 1.385）、正文行距 1.69、双层差分描边（上左 2px、下右 1px）、彩色状态点 + 「点击切回 ›」、右上 × 独立热区；配色由底色与文字色混合派生，浅色底补一点冷色。
 - **调试**：`notify.ps1 -Snapshot <path>` 直接把静态帧写成 PNG。
+- **0.5.1 修复**：常驻宿主下通知关闭后，1000ms 的 KeepTop 定时器仍会访问已释放的窗体，触发 .NET 未处理异常（对象名 DshToast）。现在窗体关闭时停止 uiTimer / keepTimer，并在 KeepTop 回调里先检查 IsDisposed，配套回归测试 `_bn20/test-host-timer.mjs` 已通过。
 
 ## 许可证
 
