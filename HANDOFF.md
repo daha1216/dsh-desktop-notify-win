@@ -1,445 +1,868 @@
-# dsh-desktop-notify-win 定制版 · BUILD 17 / 18 / 19 交接文档
+# dsh-desktop-notify-win 定制版 · BUILD 20 交接文档
 
-> 生成时间：2026-11-11 02:5x；12:5x 更新 BUILD 18（第 8.1 节：dsh footer 按拍板 B 接入倒计时 / 暂停两态）；13:2x 更新 BUILD 19（第 8.2 节：整体缩放 `scale`，三套版式通用）。对应代码状态：`index.js` BUILD=19 / 421 行 / 14562 字节、`client.js` 1352 行 / 52524 字节、`notify.ps1` 1441 行 / 64593 字节 / 纯 ASCII、`settings.json` 485 字节。宿主进程当前仍报 build 18，重启后才加载 19。
-> 上一份文档（`D:\dsh work\dsh-desktop-notify-win-交接文档.md`，34756 字节，2026-11-11 00:37）只覆盖条状 / 卡片两套版式，本次不复用它；本文档覆盖全部三套版式（bar / card / dsh）。
+最后更新：2026-11-11
+代码位置：D:\dsh work\dsh-desktop-notify-win
+发布仓库：https://github.com/daha1216/dsh-desktop-notify-win
+上游：https://github.com/xiaotie3088/dsh-desktop-notify-win
 
----
-
-## 0. 先看这里（TL;DR）
-
-1. **三套版式已全部打通**：`bar`（条状）、`card`（卡片）、`dsh`（DSH 原生）。BUILD 17 时宿主已实际弹过 dsh 版式的通知（日志有证）；BUILD 18 只改了 footer 语义；BUILD 19 新增整体缩放（`scale`，50%–150%），三套版式通用，重启宿主即生效。
-2. **唯一真源**：`D:\dsh work\dsh-desktop-notify-win`。DSH profile 里的插件目录（`C:\Users\daha\.dsh\profiles\desktop\node_modules\dsh-desktop-notify-win`）是指向它的 SymbolicLink（目录链接），`package.json` 里依赖写的是 `link:`，所以改这里就是改运行中的插件。
-3. **当前实时配置**（`settings.json`，截至 2026-11-11 13:2x）已是 **dsh** 版式：底色纯白、强调色 #7c8ff0、宽 530、圆角 18、透明度 0.8、整体缩放 100%（`scale`: 1）、无投影、无进度条、`status` 留空、`eyebrow` 留空。也就是说重启宿主加载 BUILD 19 后，下一张 dsh 卡是 100% 大小、倒计时 footer。觉得太大就把「整体缩放」调到 70%–85%；想改回其它版式：设置页点对应预设（条状 / 卡片 / DSH 原生），或改 `settings.json` 的 `layout` 后刷新。
-4. **本次补的交付物**：四张图（`notify-layout-dsh.png`、`notify-layout-dsh-status.png`、`notify-dsh-compare.png`、`notify-scale-compare.png`）、更新后的 `README.md`、把本文档放进插件目录当 `HANDOFF.md`（README 里原本就指向它，但文件一直不存在）。
-5. **dsh footer 的语义已拍板为方案 B 并落地（BUILD 18）**：`status` 留空时不再自动补状态文案，底部显示「N 秒后收起 · 悬停可保留」，鼠标悬停变「已暂停 · 移开继续」；填了 `status` 就显示自定义文案。改完需重启宿主才生效；BUILD 19 代码的响应头 `x-dsh-notify-build` 应为 19。详见第 8.1 节。
-6. **整体缩放已落地（BUILD 19，2026-11-11 13:1x）**：新增配置字段 `scale`（0.5–1.5，默认 1）。`notify.ps1` 在 `ReadStyle()` 开头把屏幕 DPI 缩放系数乘以 `DSH_NOTIFY_SCALE`，之后所有几何、字号、间距、圆角、投影都按同一个 `s` 绘制，所以三套版式都是整张卡片等比缩放；设置页「颜色与大小 → 整体缩放」是 5% 步进的滑杆。实测 70% 时 dsh 卡 780×396 物理像素（原 1112×561），130% 为 1446×730。详见 2.4 / 8.2 节。
+本文描述 BUILD 20（版本 0.5.0）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 20 的代码修正了几处旧结论。
 
 ---
 
-## 1. 这是什么、装在哪
+## 0. TL;DR
 
-`dsh-desktop-notify-win` 是 DeepSeek Harness 的 Windows 桌面通知插件：本轮完成、agent 出错、需要你回答、需要授权（含权限提升）时，在**鼠标所在显示器**的角落弹一张自绘卡片；点卡片切到 DSH 所在虚拟桌面并聚焦。宿主侧只有一小段 JS，弹窗是每次 spawn 一个短命 `powershell.exe` 跑 `notify.ps1`，用分层窗口（Layered Window）+ `UpdateLayeredWindow` 逐像素自绘，不抢焦点。
+这个插件给 DeepSeek Harness 提供 Windows 桌面通知：本轮完成、需要回答、需要授权、执行出错、插件启动这五类事件发生时，在屏幕角落弹一张自绘卡片。点卡片会切回 DSH 所在的虚拟桌面并聚焦，不抢当前窗口焦点。
 
-| 项 | 值 |
+BUILD 20 的核心变化：
+
+- host 端从单文件拆成 index.js + lib/ 七个模块，通知编排、配置、历史、日志、路径、渲染宿主各自独立。
+- notify.ps1 新增 -Serve 常驻宿主模式：第一张卡片出现时启动一个 powershell.exe，之后所有卡片复用；连续失败才回退到每次一个短命进程。
+- 设置页重写为六段式：通知什么 / 什么时候不打扰 / 样式 / 最近通知 / 数据与维护 / 实时预览。
+- 新增五类事件开关、免打扰时段、前台 / 全屏 / 专注助手抑制、最多同屏、显示器选择、点击行为、历史 50 条与抑制原因、预览与重播、导入导出、恢复默认。
+- 配置和历史搬到数据目录（默认 %USERPROFILE%\.dsh\desktop-notify），首次运行会从插件目录的旧 settings.json 迁移。
+- 八套预设、三种版式保留；dsh 白卡仍按参考图逐像素复刻，但颜色、圆角、高光、缩放已经统一走通用卡片路径。
+- 修复了旧版若干行为不一致：事件关闭也写历史、maxVisible 实际是淘汰最早而不是排队、所有事件到点自动收起、状态行/应用名的长度上限与服务端对齐。
+
+当前状态：
+
+- 代码与静态测试在 BUILD 20 工作副本里完成；发布和安装状态请看 8.6 的清单，以远端 commit 和 profile 里的 package.json 为准。
+- 工作副本本身不是 git 仓库；发布依靠复制进 fork 的克隆再提交。
+- 没有构建步骤。index.js / client.js / lib/*.js 直接是 ESM 源码，notify.ps1 直接由 powershell.exe 执行。
+
+最容易踩的五个坑：
+
+1. 改工作副本不会影响正在运行的插件。desktop profile 是从 GitHub 仓库安装的副本，必须推送并更新插件，或者临时从本地目录安装。
+2. 数据目录不是插件目录。旧版的 settings.json 在插件目录，BUILD 20 读取的是 %USERPROFILE%\.dsh\desktop-notify\settings.json。
+3. dsh 版式的底部倒计时在真实通知里通常看不见。service 在 dsh 下总会填 status，只有直接调用 notify.ps1 或预览里状态为空时才显示倒计时。详见 9.1。
+4. dsh 卡片的状态点颜色来自 accent，默认开启语义色，所以会随事件变色，不是固定红点。预设里的 #b96060 只在关闭语义色后才直接生效。
+5. 预览用表单当前值，真实通知用已保存的值。这是两个不同的数据源。
+
+---
+
+## 1. 安装形态与路径
+
+| 用途 | 路径 |
 |---|---|
-| 工作副本 / 唯一真源 | `D:\dsh work\dsh-desktop-notify-win` |
-| profile 安装形态 | 目录 SymbolicLink（LinkType=SymbolicLink）指向上面这个目录；`package.json` 依赖为 `link:` |
-| 插件在宿主里的 id | `desktop-notify`（cordis.patch.yml 里 insert 的 id） |
-| 设置页路由 | `/dsh-desktop-notify/api/config`（GET 读 / POST 存 / POST {action:'test'} 测试） |
-| 宿主地址 | `http://127.0.0.1:2940`（旧端口 24194 已废弃，连接被拒） |
-| 构建版本标记 | 响应头 `x-dsh-notify-build`；代码为 `19`，重启宿主后该头应报 19（当前进程仍是 18） |
-| 整体缩放 | `scale` 字段，0.5–1.5（50%–150%），默认 1；三套版式通用（BUILD 19） |
-| 运行日志 | 插件目录下 `notify-debug.log`（UTC，宿主侧）、`notify-click.log`（本地 +08，渲染进程侧） |
+| 工作副本（唯一开发源） | D:\dsh work\dsh-desktop-notify-win |
+| desktop profile 的插件安装目录 | C:\Users\daha\.dsh\profiles\desktop\node_modules\dsh-desktop-notify-win |
+| desktop profile 的 package.json | C:\Users\daha\.dsh\profiles\desktop\package.json |
+| 数据目录（默认） | C:\Users\daha\.dsh\desktop-notify |
+| 数据目录覆盖变量 | DSH_NOTIFY_DATA_DIR |
+| DSH 根目录变量 | DSH_HOME，默认 %USERPROFILE%\.dsh |
+| 设计参考（单文件 HTML 复刻） | D:\dsh work\dsh-error-card.html |
+| 当前 fork | https://github.com/daha1216/dsh-desktop-notify-win |
+| 上游 | https://github.com/xiaotie3088/dsh-desktop-notify-win |
+| DSH CLI | D:\deepseek harness\resources\runtime\cli\bin\dsh.cmd |
+
+工作副本里还有构建时产生的临时文件（settings.json、notify.log、notify-click.log、client.js.bak-truncated-20261111 等），它们不属于发布内容。发布文件清单以 package.json 的 files 字段为准：index.js、client.js、notify.ps1、cordis.patch.yml、locale/*.json、icon.svg、README.md、LICENSE、lib/*.js。HANDOFF.md 不在 npm 包里，但应该保持在 GitHub 仓库里。
+
+安装方式有三种，README 里有用户视角的说明：
+
+- DSH 设置 → 插件 → 添加插件，填 https://github.com/daha1216/dsh-desktop-notify-win
+- dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win
+- 本地目录：添加插件时填工作副本的绝对路径，适合调试未发布的改动
+
+注意：desktop profile 当前是从 GitHub tarball 安装的普通目录，不是指向工作副本的 Junction，依赖写法也不是 link:。所以“改工作副本 → 刷新 DSH”不会生效。BUILD 17-19 的旧文档里说它是 Junction，那是当时的临时状态，已经过时。
 
 ---
 
-## 2. 三套版式的定位与总览
+## 2. 三种版式
 
-| | 条状 `bar` | 卡片 `card` | DSH 原生 `dsh` |
+### 2.1 总览
+
+| | 横条 bar | 卡片 card | DSH 白卡 dsh |
 |---|---|---|---|
-| 定位 | 轻量一行提示（默认） | 图标 + 多层文字的通用卡片（移植 CPAMC 启动卡） | 逐像素复刻 DSH Web 自带的白底大卡 |
-| 结构 | 左侧色条 + 标题 + 正文 | 56×56 图标板 + 小标题 + 大标题 + 多行正文 + 状态行 | 51×51 圆角图标板（鲸鱼）+ 应用名 + 大标题 + 正文 + 红点状态行 + 「点击切回 ›」 + 右上 × |
-| 栅格 | 单列 | 12 栏（图标占 2 栏，文字占 3–12 栏） | 固定几何常量（不跟栅格，跟参考卡） |
-| 高度 | 随正文行数 | 随正文行数 | 随正文行数（公式见 2.3） |
-| 左侧色条 | 可调宽度 | 强制隐藏 | 强制隐藏 |
-| 底部进度条 | 可调 | 强制隐藏 | 强制隐藏 |
-| 状态行 | 状态文字 | 状态文字 + 相位扩散环 | 红点 + 状态文字（每帧重绘） |
-| 关闭按钮 | 无（点任意处切回） | 无 | 右上 × 独立热区（只关卡片，不切回） |
-| 图标开关 | 生效（小圆点） | 生效 | **不生效**（鲸鱼图标板始终画） |
-| 字号来源 | titleSize / bodySize 直接取 | 同左（另有派生） | 按固定倍率从 titleSize / bodySize 派生，见 2.3 |
+| 定位 | 最轻量，一行标题 + 正文 | 信息量更大的图标卡 | 复刻 DSH Web 自己的白底大卡 |
+| 默认宽度 | 400 | 528 | 531 |
+| 高度 | 内容自适应，下限 68×scale | 内容自适应，下限 96×scale | 公式计算，下限 97×scale |
+| 图标 | 可选圆点，颜色 accent | 56×scale 图标板 + 三层菱形 | 固定鲸鱼图标板 51×scale |
+| 小标题 eyebrow | 不使用 | 标题上方 tracked 小字 | 左上角应用名 |
+| 正文 | 最多 3 行 | 最多 3 行 | 最多 3 行，行高 1.69 倍 |
+| 状态行 status | 不绘制 | 有 status 时绘制圆点 + 文案 | 底部固定 footer，始终有状态文案或倒计时 |
+| 色条 accentWidth | 生效 | 不绘制 | 强制为 0 |
+| 进度条 progress | 生效 | 强制关闭 | 强制关闭 |
+| 关闭按钮 | 无 | 无 | 右上角 ×，独立热区 |
+| 圆角 radius | 生效 | 生效 | 生效 |
+| 顶部高光 shine | 生效 | 生效 | 生效，预设里为 0 |
+| padX / padY | 生效 | 生效 | 忽略 |
 
-设置页的版式选择在 `client.js:1044-1067`（三个按钮：条状 / 卡片 / DSH 原生）。
+一个容易混淆的点：dsh 版式里的 padX / padY 仍然会被 ReadStyle 读入并乘 scale，但 ComputeLayout 的 dsh 分支完全用固定几何，不使用这两个值。设置页会把它们禁用并注明“在 DSH 白卡里不生效”。
 
-> **BUILD 19 起**，渲染侧的总缩放系数 `s` = 屏幕 DPI 缩放 × 用户 `scale`（0.5–1.5）。下面各节里的逻辑常量、字号、间距都乘这个 `s`，因此「整体缩放」是整张卡等比缩放；而 `width` 只改卡片宽度与正文换行，不改变字号与图标大小。
+### 2.2 横条 bar
 
-### 2.1 条状 `bar`
+在 notify.ps1 的 ComputeLayout 的 else 分支（约 889-915 行）：
 
-- 布局在 `notify.ps1:773-799`：内容左边界 = 色条宽 + 水平内边距，正文最多 3 行，标题 1 行；卡高 = 正文底 + 垂直内边距（+ 进度条高度），下限 `68 * scale`。
-- 色条是左侧渐变竖条（`BuildStatic:873`），宽度 0 即不画。
+    contentLeft = round(accentW + padX)
+    contentWidth = round(cardW - accentW - 2*padX - iconSpace)
+    iconSpace = iconOn ? iconD + 8*scale : 0
+    bodyTop = padY + titleH + gap
+    cardH = bodyTop + bodyH + padY + (progressOn ? progressH + 4*scale : 0)
 
-### 2.2 卡片 `card`
+- 标题只画一行，超长省略号；正文最多 3 行，超长省略号。
+- 色条从卡片左边缘开始，宽 accentWidth，纵向渐变；只有 accentWidth > 0.5 且不是 card 时绘制。
+- 图标是直径 7×scale 的圆点，不是图标板。
+- bar 不绘制 status 字段；service 在非 dsh 下默认把 status 设为 settings.status 或空，所以通常也不会有状态行。
+- 关闭方式只有超时、点击、右键；没有关闭按钮。
 
-- 布局在 `notify.ps1:738-772`：12 栏网格，`colW = (cardW - padX*2 - 11*gutter) / 12`（gutter = 12），文字从第 3 栏开始（`cardTextX = padX + colW*2 + gutter*2`）；标题最多 2 行、正文最多 3 行，超出省略；行间距 `gEyebrow=3`、`gDesc=9`、`gStatus=17`（都乘 scale）；卡高下限 `96 * scale`。
-- 绘制在 `notify.ps1:965-1041 DrawCardContent`：56×56 图标板、小标题（默认从标题里按 `" · "` 切成两段，前半当小标题）、大标题、正文、状态行；当 status 非空时状态点外围画一个相位 2000ms 的扩散环（`Render:1247` 里画，最多 3.4 倍半径）。
-- 标题切分规则在 `notify.ps1:652-664`：环境变量 `DSH_NOTIFY_EYEBROW` 非空则直接当小标题；否则按 `" \u00b7 "`（U+00B7 两侧空格）把标题切成两段，前段当小标题；都拿不到就写 `"DSH"`。所以宿主发的 `DSH · 本轮完成` 在卡片版式里会显示成小标题 `DSH` + 标题 `本轮完成`。
+### 2.3 卡片 card
 
-### 2.3 DSH 原生 `dsh`（本次重点）
+ComputeLayout 的 card 分支（约 854-888 行）：
 
-**参考物**：`D:\dsh work\dsh-error-card.html`（单文件 HTML 复刻，从 DSH Web 的真实错误卡量出来的几何），以及 `dsh-error-card-preview.png` / `dsh-error-card-compare.png`。
+    colW = (cardW - 2*padX - 11*gutter) / 12
+    cardTextX = padX + 2*colW + 2*gutter
+    cardTextW = cardW - padX - cardTextX
+    gEyebrow = 3*scale
+    gDesc = 9*scale
+    gStatus = 17*scale
+    total = padY + eyebrowH + gEyebrow + titleH2
+    if body: total += gDesc + descH
+    if statusOn: total += gStatus + statusLineH2
+    total += padY
+    cardH = max(total, padY*2 + iconBox, 96*scale)
 
-**复刻原则**：
+- 12 栏网格，左侧图标板占 2 栏，文字从第 3 栏开始。
+- 标题最多显示 2 行（测量区域 titleLineH*2），实际换行交给 GDI+；正文最多 3 行。
+- 图标板 56×scale，圆角 0.23 倍，底色 Blend(bg, accent, 0.10)，里面画三层菱形加中心点，都是 accent 派生色。
+- 状态行圆点直径是状态行高的 0.44 倍，颜色 dotColor = accent；旧文档说状态点有 2000ms 扩散环，BUILD 20 仍保留在 Render 里，但只在 card 且 statusOn 时绘制。
+- card 强制关闭 progress，不绘制 accentWidth。
+- card 没有关闭按钮。
 
-- **不写死任何颜色**。底色 `DSH_NOTIFY_BG` 与文字色 `DSH_NOTIFY_TEXT` 是唯一输入，其余颜色按「往文字色混合多少」或「往白色混合多少」派生（见下），所以浅色底 / 深色底都能自洽；浅色底再额外补一点蓝调（`Cool()`），因为参考卡实测不是纯灰而是偏蓝的冷灰。
-- **几何用常量**，不复用条状 / 卡片的栅格，这样任何宽度下都跟参考卡一致（宽度只影响正文换行与右侧留白）。
-- **阴影更弱**：7 层堆叠、每层 alpha 上限 5（其他版式 10 层、上限 66），描边用两层差分环拼出「上左 2px、下右 1px」的原生观感。
+### 2.4 DSH 白卡 dsh
 
-**几何常量（逻辑像素，DPR = 1 时的值；渲染时全部乘 `s` = 屏幕 DPI 缩放 × 用户 scale）**，见 `notify.ps1:708-736`：
+dsh 分支（notify.ps1 约 824-853 行）使用固定逻辑像素再乘 scale：
 
-| 名称 | 值 | 说明 |
-|---|---|---|
-| tile | 51 | 图标板边长，圆角 = 51 × 0.196 ≈ 10 |
-| tileX / tileTop | 29 / 32 | 图标板左上角 |
-| textX | 101 | 文字左边界（= tile 右缘 + 21） |
-| rightPad | 25 | 正文右侧留白 |
-| appTop | 29 | 应用名文字顶 |
-| titleTop | appTop + appH + 5.5 | 大标题顶 |
-| bodyTop | titleTop + titleH + 14 | 正文顶 |
-| bodyLineH | `round(bodyPx * 1.69)` | 正文行距 |
-| footerTop | 有正文：bodyTop + bodyH + 14.5；无正文：titleTop + titleH + 20 | footer 顶 |
-| footerH | 32 | footer 高 |
-| cardH | footerTop + 32 + 14.5，下限 97 | 卡高 |
-| 红点 | 7 × 7.6，圆心 y = footerTop + 15.5 | 颜色 = 强调色 |
-| 链接 | 右对齐，画在 `card.Right - 25 - 300` 起、宽 300、高 32 | 文案「点击切回 ›」 |
-| 关闭 × | 画在 `cx = card.Right - 39`、`cy = card.Y + 41`，半臂 5、笔宽 2、圆头 | 命中热区见下 |
+| 元素 | 公式/位置 |
+|---|---|
+| 图标板 | 51×scale，左上角 (29×scale, 32×scale)，圆角 51×0.196 |
+| 文字左边界 | 101×scale |
+| 右侧留白 | 25×scale |
+| 可用文字宽 | max(40, cardW - 101*scale - 25*scale) |
+| 应用名 top | 29×scale，字体 Segoe UI Semibold，字号 clamp(12..26, titlePx*1.15) |
+| 标题 top | appTop + appH + 5.5×scale，字号 clamp(18..40, titlePx*1.60)，粗体 |
+| 正文 top | titleTop + titleH + 14×scale，字号 clamp(11..34, bodyPx*1.385)，行高 round(bodyPx*1.69) |
+| footer top | 有正文：bodyTop + bodyH + 14.5×scale；无正文：titleTop + titleH + 20×scale |
+| footer 高 | 32×scale |
+| 卡片高 | footerTop + 32×scale + 14.5×scale，下限 97×scale |
+| footer 圆点 | x=文字左边界，y=footerTop+15.5×scale，7×7.6×scale |
+| 链接文案 | “点击切回 ›”，右对齐，区域从 card.Right-25-300 起，宽 300×scale，高 footerH |
+| 关闭 × | 中心 (card.Right-39×scale, card.Y+41×scale)，半臂 5×scale，笔宽 2×scale，圆头 |
+| 关闭热区 | (card.Right-54×scale, card.Y+26×scale, 30×scale, 30×scale) |
 
-**字号派生**（`notify.ps1:623-630`，输入是已乘 scale 的 titlePx = titleSize×s、bodyPx = bodySize×s；clamp 的上下限也都乘 s）：
+字号派生（ReadStyle 712-719 行）：app = clamp(12s..26s, titlePx*1.15)，title = clamp(18s..40s, titlePx*1.60)，body = clamp(11s..34s, bodyPx*1.385)，meta = clamp(10s..26s, bodyPx*1.15)，link = clamp(10s..28s, bodyPx*1.27)。默认 titleSize=15、bodySize=13 时，200% DPI 的逻辑尺寸接近参考图。
 
-| 用途 | 公式 | 默认设置下（titleSize 15 / bodySize 13，200% 屏） | 参考卡实测 |
-|---|---|---|---|
-| 应用名 | `clamp(12..26, titlePx * 1.15)` | 34.5 物理像素 ≈ 17.25 逻辑 | 17px |
-| 大标题 | `clamp(18..40, titlePx * 1.60)` | 48 ≈ 24 | 24px |
-| 正文 | `clamp(11..34, bodyPx * 1.385)` | 36 ≈ 18 | 18px |
-| 状态行 | `clamp(10..26, bodyPx * 1.15)` | 29.9 ≈ 14.95 | 15px |
-| 链接 | `clamp(10..28, bodyPx * 1.27)` | 33 ≈ 16.5 | 16.5px |
+配色派生（ReadStyle 775-817 行）。light 定义为背景亮度 > 140。所有颜色优先由 bg 和 fg 混合：
 
-**配色派生**（`notify.ps1:671-701`；`Blend(a, b, t)` = a 往 b 混 t；`light = 底色亮度 > 140`）：
+- 描边：light 用 Blend(bg, fg, 0.10)，dark 用 Blend(bg, white, 0.14)
+- 图标板：light 0.055，dark 0.09
+- 鲸鱼：light 0.36，dark 0.42
+- 应用名：light 0.30，dark 0.34
+- 正文：light 0.33，dark 0.38
+- footer 状态字：light 0.38，dark 0.42
+- 链接：light 0.22，dark 0.30
+- 关闭 ×：light 0.55，dark 0.45
 
-| 元素 | 浅色底公式 | 深色底公式 | 浅色底再补的冷色（R,G,B 增量） |
-|---|---|---|---|
-| 描边 | Blend(bg, fg, 0.10) | Blend(bg, white, 0.14) | (-2, 0, 2) |
-| 图标板 | Blend(bg, fg, 0.055) | Blend(bg, white, 0.09) | (0, 2, 4) |
-| 鲸鱼 | Blend(fg, bg, 0.36) | 0.42 | — |
-| 应用名 | 0.30 | 0.34 | (1, 7, 16) |
-| 正文 | 0.33 | 0.38 | (0, 4, 9) |
-| 状态行 | 0.38 | 0.42 | (0, 2, 9) |
-| 链接 | 0.22 | 0.30 | (0, 6, 18) |
-| 关闭 × | 0.55 | 0.45 | (0, 4, 9) |
+浅色底还会做一次冷色补正，把灰调拉出一点蓝：
 
-**字体**：应用名强制 `Segoe UI Semibold`（`PickFamily` 找不到则回退），其余用 `DSH_NOTIFY_FONT`（默认 Microsoft YaHei UI）。这就是为什么参考卡里「DeepSeek Harness」是西文 Semibold 而中文标题是雅黑。
+- 图标板 (+0,+2,+4)，描边 (-2,0,+2)
+- 应用名 (+1,+7,+16)，正文 (+0,+4,+9)
+- footer 状态字 (+0,+2,+9)，链接 (+0,+6,+18)，关闭 × (+0,+4,+9)
 
-**footer 三态**（`notify.ps1:1104-1124 DrawDshFooterLabel`，每帧重绘、带 alpha）：
+应用名强制用 Segoe UI Semibold；应用名文案取 settings.eyebrow，空则默认 DeepSeek Harness。footer 圆点颜色是 dotColor = accent；BUILD 20 默认开启 semanticColor，所以 turnEnd 是 #7c8ff0、question 是 #d99a2b、approval 是 #d97b2b、error 是 #d9534f、startup 是 #3ba55d。预设 dsh 的 accent #b96060 会被语义色覆盖，只有关闭 semanticColor 才看得到参考图里的红点。
 
-1. `DSH_NOTIFY_STATUS` 非空 → 显示它；
-2. 否则鼠标悬停暂停中 → 「已暂停 · 移开继续」；
-3. 否则 → 「N 秒后收起 · 悬停可保留」（N = 剩余秒数向上取整）。
+footer 文案有三态（DrawDshFooterLabel 1234-1254 行）：
 
-**三种状态的触发条件**：BUILD 17 时 `index.js` 总把 `STATUS_TEXT` 填进 `DSH_NOTIFY_STATUS`，所以第 2、3 态在真实弹窗里看不到；BUILD 18 起 dsh 版式下 `status` 留空就不再补文案（`index.js:214`），倒计时和悬停暂停两态自然出现。详见第 8.1 / 9.1 节。
+1. status 非空 → status
+2. status 为空且鼠标悬停 → “已暂停 · 移开继续”
+3. status 为空且未悬停 → “N 秒后收起 · 悬停可保留”
 
-**窗口与交互**：
+BUILD 20 的 service 在 dsh 下把 status 设为 settings.status || 事件默认状态（如“等待你的确认”），因此真实通知通常永远走第 1 态，第 2、3 态只在直接调用 notify.ps1 或预览没有 status 时出现。这与 BUILD 18 设计的“状态行留空就看倒计时”不同，是本轮最值得重新决策的行为，详见 9.1。
 
-- 位图尺寸 = 卡尺寸 + 两侧各 `shadowPad`（dsh 下 = ceil(13 × s)，阴影强度 ≤ 0.01 时为 0），所以 200% 屏、卡 531 逻辑宽时，位图 1062 + 52 = 1114 物理像素宽。
-- 关闭热区 `dshCloseRect = (card.Right - 54s, card.Y + 26s, 30s, 30s)`（`notify.ps1:805`），命中则只 `Close()`，不切桌面；点在别处才 `DshActions.FocusDsh(Handle)` 再关闭（`notify.ps1:564-579`）。
-- 没有左侧色条、没有顶部高光（glaze），投影与描边见上面。
+dsh 的底色、文字色、圆角、高光、阴影都走通用卡片路径，不是写死的：
 
-**实测尺寸**（`scale` 100%）：dsh 预设（宽 531、正文 3 行）在 200% 屏上渲染为卡 `1062 × 509` 物理像素 = 531 × 254.5 逻辑像素，参考卡 531 × 255 —— 差 0.5 逻辑像素。
+- 卡面按 radius 圆角填充 bg；shine > 0.001 时从上到下做白色高光渐变。
+- 投影层数 dsh=7、其他=10；dsh 的 shadowPad = shadow > 0.01 ? ceil(13×scale) : 0。
+- dsh 使用双层差分描边：上左 2px、下右 1px，模拟原生卡的内阴影方向；其他版式是 1px 描边加顶部白色 glaze。
+- 关闭热区、链接、footer、鲸鱼是 dsh 专属绘制。
 
-**视觉对照**：
+复刻精度：dsh 预设（width 531、radius 15、bg #fdfdfe、text #262b35）在 200% DPI 下渲染出的卡片约 1062×509 物理像素，即 531×254.5 逻辑像素，与参考目标 531×255 的差在 1px 内。参考图和并排对比图的生成脚本曾放在 D:\dsh work\_dshport，属于临时验证材料，不随插件发布。
 
-- `notify-dsh-compare.png`（2208×566）：左 = 原生 DSH 错误卡，右 = 插件 dsh 版式渲染。几何、字号、留白、鲸鱼轮廓基本重合，差异只有 footer 文案（原生「15 秒后收起 · 查看日志 ›」vs 插件「20 秒后收起 · 点击切回 ›」）。
-- `notify-layout-dsh.png`（1114×561）：插件 dsh 版式单张预览，footer 为倒计时态。
-- `notify-layout-dsh-status.png`（1114×561）：同一张卡，footer 为状态文案态（填了 `status` 时的样子）。
+### 2.5 整体缩放 scale
 
-面板字段在两个版式下的语义不同（`client.js:1068-1092`）：
-
-| 字段 | card 下 | dsh 下 |
-|---|---|---|
-| `status` | 底部状态行小字，留空按通知类型自动选 | 红点后面那行小字：留空显示倒计时 / 悬停暂停，填了显示自定义文案（BUILD 18 起） |
-| `eyebrow` | 标题上方的大写小标题 | 图标右侧的应用名（留空 = DeepSeek Harness） |
-
-### 2.4 整体缩放 `scale`（BUILD 19 新增）
-
-用户反馈「弹窗还是太大，调宽度没用」：`width` 只改卡片宽度，dsh 版式的字号、图标、间距、行高是按参考卡锁死的，所以只缩宽度看起来变化不大。BUILD 19 增加 `scale` 字段，把整张卡连同字号一起等比缩放。
-
-- 配置：`settings.json` 的 `scale`（0.5–1.5，默认 1），设置页「颜色与大小 → 整体缩放」滑杆（5% 步进，显示百分比）。
-- 渲染入口在 `notify.ps1:585-586`：
-
-  ```powershell
-  double userScale = Math.Max(0.5, Math.Min(1.5, EnvDouble("DSH_NOTIFY_SCALE", 1.0)));
-  scale = ScreenScale() * userScale;
-  ```
-
-  之后所有几何、字号、间距、圆角、投影、阴影留白都用 `s = (float)scale`，三套版式一致。
-- 宿主链路：`index.js:41` 默认值 `scale: 1`、`index.js:114` `clamp(source.scale, 0.5, 1.5, base.scale)`、`index.js:216` 环境变量 `DSH_NOTIFY_SCALE`。
-- 实测（200% 屏、dsh 版式、width 530）：100% → 位图 1112×561（卡 1062×509）、70% → 780×396、130% → 1446×730；bar 版式 width 400、80% → 652×181。三档并排见 `notify-scale-compare.png`。
-- 预览：按 `scale` 同比缩放，但放大超过 100% 时只画到原始尺寸，避免在预览框里被裁切（见 9.2 第 9 条）。
-- 注意：最终卡宽 = `width × scale`，两项都可调；但只想改文字大小而不改卡宽，目前做不到（整体缩放会一起改）。
+- ReadStyle 先取 userScale = clamp(DSH_NOTIFY_SCALE, 0.5, 1.5)，再取 targetScreen 的 DPI 比例，scale = DPI比例 × userScale。
+- 所有以 scale 为后缀的几何、字号、间距、圆角、投影都会乘 s；radius/pad/margin 在 schema 里存逻辑值，渲染时再乘。
+- width 也是逻辑值，最终 cardW = round(width × scale)。
+- 预览在 scale > 1 时只按 100% 绘制，避免被容器裁切；真实通知按实际 scale。
+- width 和 scale 是两套独立的控制：width 改卡片宽，scale 等比放大所有东西。无法只缩字而不缩卡片，这是当前架构的已知限制。
+- 实测：100% 屏幕、scale=1、dsh 531 宽时位图约 1112×561，卡片 1062×509；scale=0.7 时约 780×396；scale=1.3 时约 1446×730。bar 在 80% 时约 652×181。
 
 ---
 
 ## 3. 代码地图
 
-### 3.1 `index.js`（14562 字节 / 421 行，宿主插件）
+### 3.1 index.js（317 行）
 
-| 行 | 内容 |
-|---|---|
-| 1-13 | import、`SCRIPT`/`SETTINGS_FILE`/`LOG`/`CLICK_LOG`/`ROUTE`、**`BUILD = 19`** |
-| 15-42 | `DEFAULTS`（26 个字段，末尾新增 `scale: 1`） |
-| 44-56 | `log()`：JSON 行追加写 notify-debug.log，超过 256KB 先截断 |
-| 58-84 | 校验助手：`clamp` / `color` / `bool` / `font`（只允许字母数字空格逗号连字符）/ `line`（压空白、超长截断加 …） |
-| 86-115 | `sanitize()`：字段范围见第 4 节；**111 行 layout 只认 `card`/`dsh`，其余一律落 `bar`**；**114 行把 `scale` clamp 到 0.5–1.5** |
-| 118-134 | `loadSettings()`（config 与 settings.json 合并后再 sanitize）/ `saveSettings()` |
-| 136-166 | `sessionTitleOf()`：从 `sessions`/`sessionTitle` 服务取标题，压空白，超 60 字截 59 + … |
-| 168-175 | `STATUS_TEXT`：idle/error/question/approval/test/startup 六种默认状态文案 |
-| 177-224 | `showCard()`：拼 `detail`（有会话标题时前置「会话：…」一行），spawn `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File notify.ps1`，stdio 忽略，环境变量传全部设置；**214 行** `DSH_NOTIFY_STATUS` 在 dsh 版式下允许为空（footer 转倒计时），其余版式回落到 `STATUS_TEXT[key]`；**216 行** 新增 `DSH_NOTIFY_SCALE` |
-| 226-264 | `ensureApprovalWatcher()`：挂在 `globalThis[Symbol.for('dsh-desktop-notify.approval-watcher')]` 上，监听 `approval/asked`，1500ms 去重；放全局是为了插件重装窗口期也能接住提权通知 |
-| 266-421 | `apply()`：配置合并、`pickPreviewAgent()`、`show()`（同 key 1.5 秒去重）、事件绑定、HTTP 路由 |
-| 366-417 | `ctx.webServer.register({kind:'exact', path:ROUTE})`：GET 返回设置；POST 里 `action:'test'` 走预览（不落盘），否则 sanitize + 写文件 + 立即生效 |
+host 插件入口，inject 为 webServer + connection。
 
-### 3.2 `client.js`（52524 字节 / 1352 行，设置页 UI）
+| 区域 | 行 | 作用 |
+|---|---|---|
+| 导入与常量 | 1-24 | schema/paths/config/history/log/renderer-host/service；API_PREFIX、MAX_BODY、WATCHER_KEY |
+| sendJson / rejectionOf / readBody | 26-55 | JSON 响应、connection.requestRejection 鉴权、64KB 请求体上限 |
+| sessionTitleOf / isRootAgent / errorMessage | 57-97 | 会话标题、根 agent 判断、错误文案 |
+| ensureApprovalWatcher | 102-129 | root.on('session/event') 监听 approval/asked，工具名兼容 data.toolName 与 toolName，1500ms 去重；全局单例，插件重载不断监听 |
+| apply 初始化 | 131-167 | resolvePaths → createLogger → SettingsStore.load → HistoryStore → getRendererHost → NotificationService |
+| pickPreviewAgent | 139-159 | 给测试/重播找一个可用的 agent 上下文 |
+| 事件接线 | 169-215 | agent/status（idle + root）触发 turnEnd 250ms 去抖；agent/error；user-questions/request（prepend）先弹 question 再 next；watcher.dispatch 弹 approval |
+| HTTP 路由 | 217-295 | 见 5.4 |
+| startup timer / cleanup / apply 日志 | 297-316 | onStartup 时 800ms 后弹 startup；dispose 时清 timer、解除 dispatch、dispose service、resetRendererHost |
 
-| 行 | 内容 |
-|---|---|
-| 59-285 | 8 套预设：`classic` 经典深色、`light` 系统浅色、`mono` 极简灰、`contrast` 高对比、`frost` 霜白圆角、`neon` 午夜霓虹、`cpamc` 卡片版式、`dsh` DSH 原生 |
-| 287 | `WHALE_PATH`：鲸鱼 SVG path（viewBox 0 0 50 50） |
-| 416-487 | `PresetCard`：预设卡片 |
-| 490-920 | `ToastPreview`：高保真预览；bar/card 在 490-721，**dsh 预览 DOM 在 723-839**（51×51 图标板 + 39×39 鲸鱼 + 应用名 + 标题 + 正文 + 红点 footer + 右上 ×）；513-514 行读取 `scale` 并把总缩放限制在 100% 以内防裁切 |
-| 1028 | 分区「快速样式」 |
-| 1044-1093 | 分区「布局」：版式三选一（1044-1067）+ card/dsh 扩展字段（1068-1092，status / eyebrow，标签随版式变） |
-| 1094-1112 | 分区「实时预览」+ 底部信息行（1101-1110，含「缩放 N%」） |
-| 1115 / 1167 / 1239 / 1281 | 分区「颜色与大小 / 形状与排版 / 质感 / 弹出与停留」；**1144-1153 是新增的「整体缩放」滑杆**（min 0.5 / max 1.5 / step 0.05） |
-| 1343-1348 | 注册设置分区：`settings.section`，id `desktop-notify`，order 30，label「桌面通知」 |
+注意两点：
 
-`dsh` 预设（`client.js:257-285`）：accent #b96060、background #fdfdfe、text #262b35、width 531、radius 15、padX 28、padY 31、accentWidth 0、shadow 0.15、shine 0、progress false、layout dsh、durationMs 20000。
+- 审批 watcher 用 globalThis[Symbol.for('dsh-desktop-notify.approval-watcher')] 存单例。插件热重载时旧监听不会被重复注册，dispatch 在 apply 里重新赋值，cleanup 时置 null。
+- user-questions/request 是 waterfall，插件 prepend 后调用 service.notify('question')，然后必须 next()，不能吞掉问题。
 
-### 3.3 `notify.ps1`（64593 字节 / 1441 行，纯 ASCII，无第三方模块）
+### 3.2 lib/ 模块
 
-`param([switch]$Quiet, [switch]$Diagnose, [string]$Snapshot = '')`；标题/正文/时长/日志路径全部从环境变量读（`DSH_NOTIFY_TITLE`、`DSH_NOTIFY_BODY`、`DSH_NOTIFY_MS`、`DSH_NOTIFY_LOG`）。
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| lib/schema.js | 300 | VERSION/BUILD、43 个 DEFAULTS、LIMITS、FONTS、EVENTS、SEMANTIC_ACCENTS、8 个 PRESETS、sanitize、isQuietHours、eventEnabled、accentForEvent |
+| lib/service.js | 229 | NotificationService：compose、抑制、合并、payload 组装、历史、预览、重播、turnEnd 去抖 |
+| lib/renderer-host.js | 296 | 常驻 notify.ps1 -Serve 宿主管理、StringDecoder 行解析、请求超时、重启上限、一次性回退 |
+| lib/config.js | 68 | SettingsStore：data → package 迁移 → defaults，sanitize 后原子写 |
+| lib/history.js | 76 | 最近 50 条，原子写，load/add/update/get/list/clear |
+| lib/log.js | 25 | JSON 行日志，256KB 截断，serializeError |
+| lib/paths.js | 35 | DSH_HOME / DSH_NOTIFY_DATA_DIR → dataDir、settings、history、log、clickLog、packageSettings |
 
-| 行 | 内容 |
-|---|---|
-| 1-9 | param 与环境变量入口 |
-| 11-... | `Add-Type` 内联 C#：Win32 P/Invoke（分层窗口、虚拟桌面 COM、DPI）、`DshDpi`、`DshActions`、`DshToast` |
-| 24-305 | `DshActions`：找 DSH 窗口、虚拟桌面切换、`KeepTop`（每秒重设 z-order 置顶）、日志 |
-| 307-313 | `DshDpi.SetProcessDPIAware` |
-| 315-1419 | `class DshToast : Form` |
-| 545-581 | 构造函数：读样式 → 算布局 → 算位置；40ms UI 定时器 + 1000ms 置顶定时器；悬停暂停 / 移开续计；点击处理 |
-| 583-702 | `ReadStyle()`：**585-586 行合成 `scale`（用户缩放 × DPI）**；读环境变量、clamp、派生字号与颜色（dsh 分支 607-701） |
-| 704-806 | `ComputeLayout()`：dsh 708-736 / card 738-772 / bar 773-799；801-805 位图与热区 |
-| 808-824 | `ComputePosition()`：按光标所在屏 WorkingArea + corner 定位，再减去 shadowPad |
-| 826-961 | `BuildStatic()`：投影（dsh 7 层 / 其余 10 层）、圆角卡面、色条、dsh 双层差分描边、高光，末尾分派 |
-| 965-1041 | `DrawCardContent()` |
-| 1043-1102 | `DrawDshContent()`（1043-1102）+ `DrawDshFooterLabel()`（1104-1124） |
-| 1126-1146 | `DrawWhale()`：四段多边形按 `WhaleCounts{223,85,37,85}` 填充，viewBox 50×50 等比缩放 |
-| 1236 | `WhaleCounts` |
-| 1247-1289 | `Render(alpha)`：静态帧 + 透明度矩阵；进度条；card 状态扩散环；1284 每帧补画 dsh footer |
-| 1290-1339 | `PushLayered()`：CreateDIBSection + CopyMemory + UpdateLayeredWindow(ULW_ALPHA) |
-| 1341-1373 | `ElapsedMs()`（扣除暂停段）、`OnTick`（超时关闭；淡入 170ms / 淡出 240ms；250ms 步进才重绘） |
-| 1375-1398 | 窗口样式：`ShowWithoutActivation`、WS_EX_LAYERED / NOACTIVATE / TOOLWINDOW、OnShown 启动时钟与首帧、按需播提示音 |
-| 1405-1418 | `SaveStatic()`：dsh 下额外补画 footer 再存 PNG |
-| 1422-1441 | 入口：`-Diagnose` 打印窗口清单；`-Snapshot <png>` 出图；否则 Application.Run |
+### 3.3 client.js（1655 行）
 
-### 3.4 其余文件
+| 区域 | 行 | 作用 |
+|---|---|---|
+| 预设 fallback | 59-285 | 8 套预设的前端副本，供 /meta 失败时兜底 |
+| WHALE_PATH | 287 | 鲸鱼 SVG path，viewBox 0 0 50 50 |
+| 基础控件 | 340-488 | Field、ColorField、Slider、Switch、PresetCard |
+| ToastPreview | 490-922 | 实时预览，dsh DOM 在 722-839 行；footer 在 status 为空时显示倒计时演示文案 |
+| API 与常量 | 924-1006 | API='/dsh-desktop-notify/api'、EVENT_LABELS、SUPPRESS_LABELS、LAYOUT_LABELS、FALLBACK、getJson/postJson、WCAG 对比度、formatSeconds |
+| Row / SubHead / Segmented / Chip / SummaryLine | 1008-1100 | 设置页排版控件；Row 用 useId + aria-labelledby |
+| SettingsPage | 1102-1644 | 见下方分段 |
+| 注册 | 1646-1655 | settings.section，id desktop-notify，order 30，label 桌面通知 |
 
-- `package.json`（1377 字节）：name `dsh-desktop-notify-win`、version 0.4.0、type module、license MIT、author xiaotie3088、os win32、engines node>=20、exports `.` / `./client` / `./locale/*.json` / `./icon`、files 含 index.js client.js notify.ps1 cordis.patch.yml locale icon.svg README LICENSE、`scripts.check = "node --check index.js && node --check client.js"`、`dsh.bundle.patch = ./cordis.patch.yml`、`dsh.client = { platform: 'web', immediately: true, inject: ['@deepseek-ai/dsh-client-ui-settings'] }`。
-- `cordis.patch.yml`（205 字节）：insert id `desktop-notify`，config `{onTurnEnd:true, onQuestion:true, onApproval:true, onError:true, onStartup:false}`。
-- `locale/zh.json` / `en.json`：只有 `meta.title` 与 `meta.description` 两条，和版式无关。
-- `icon.svg`、`LICENSE`：上游原样。
+SettingsPage 的分段锚点：
 
----
+- 1102-1132：state、加载 /config 后并行 /meta、busy/status/saved
+- 1136-1146：dirty（JSON 比较）、beforeunload 拦截
+- 1156-1168：defaults/limits/presets/events/fonts/version/build 兜底
+- 1173-1235：patch、save、loadHistory、test、replay、clearHistory
+- 1237-1280：applyPreset、exportSettings、applyImport、resetDefaults
+- 1282-1296：对比度、ignored 字段、layoutOptions
+- 1298-1324：header（版本、BUILD、dataDir、未保存、测试、保存）与 status
+- 1328-1338：通知什么（5 个 Switch）
+- 1340-1391：什么时候不打扰（免打扰、前台、全屏、专注助手、最多同屏、显示器、点击行为）
+- 1393-1535：样式（版式、预设、停留时长、提示音、缩放、外观细节）
+- 1459-1535：尺寸与位置、文字、效果、无障碍；含弹出位置 corner 与水平/垂直边距 marginX/marginY
+- 1537-1581：最近通知（最多显示 30 条）
+- 1583-1606：数据与维护（dataDir、loadedFrom、导出、导入、恢复默认）
+- 1608-1627：实时预览（ToastPreview + 5 行摘要 + 用当前值测试）
+- 1610-1644：两栏布局，左栏五段，右栏 sticky 预览
 
-## 4. 配置字段全表
+注意：状态行文案 maxLength=40、应用名 maxLength=16，与 schema 的截断上限一致；颜色对比度用 WCAG 公式，低于 4.5:1 时提示并可一键改为深色或白色文字。
 
-默认值来自 `index.js:15-42`，范围来自 `sanitize()`（86-115），渲染侧再各自 clamp 一次；环境变量名字由 `showCard()` 177-224 拼出。
+### 3.4 notify.ps1（1878 行，纯 ASCII）
 
-| 字段 | 默认 | 范围 / 取值 | 生效版式 | 说明 |
-|---|---|---|---|---|
-| `accent` | #1f6beb | `#rrggbb` | 全部 | 强调色：色条、小圆点、dsh 红点 |
-| `background` | #202020 | `#rrggbb` | 全部 | 卡底色；dsh 下还决定整套派生色 |
-| `text` | #ffffff | `#rrggbb` | 全部 | 标题 / 正文基色；dsh 下标题直接用原色 |
-| `width` | 400 | 240-720 | 全部 | 卡宽（逻辑像素）；最终卡宽 ≈ `width × scale` |
-| `scale` | 1 | 0.5-1.5 | 全部 | 整体缩放（BUILD 19）：连同字号、图标、间距、圆角、投影一起等比缩放；100% 为原始大小 |
-| `durationMs` | 20000 | 3000-120000 | 全部 | 停留时长 |
-| `sound` | true | bool | 全部 | 弹窗时播系统 Asterisk |
-| `corner` | br | `br`/`bl`/`tr`/`tl` | 全部 | 相对光标所在屏的角 |
-| `marginX` / `marginY` | 16 / 16 | 0-400 | 全部 | 离屏幕边缘距离 |
-| `opacity` | 0.97 | 0.5-1 | 全部 | 整窗透明度 |
-| `radius` | 12 | 0-28 | bar / card | 圆角；dsh 按参考卡比例，不走这个值 |
-| `padX` | 20 | 12-40 | bar / card | 水平内边距 |
-| `padY` | 16 | 10-32 | bar / card | 垂直内边距 |
-| `accentWidth` | 4 | 0-14 | bar | 色条宽度；card / dsh 强制 0 |
-| `titleSize` | 15 | 11-22 | 全部 | 条状/卡片直接用；dsh 用来派生（×1.15 应用名、×1.60 大标题） |
-| `bodySize` | 13 | 10-20 | 全部 | 条状/卡片直接用；dsh 用来派生（×1.385 正文、×1.15 状态行、×1.27 链接） |
-| `progress` | true | bool | bar | 底部进度条；card / dsh 强制关 |
-| `icon` | true | bool | bar / card | 小圆点 / 图标板；**dsh 忽略** |
-| `fade` | true | bool | 全部 | 淡入 170ms / 淡出 240ms |
-| `shadow` | 0.45 | 0-1 | 全部 | 投影强度；dsh 下只决定层数与透明度 |
-| `shine` | 0.05 | 0-0.3 | bar / card | 顶部高光；dsh 无高光 |
-| `font` | Microsoft YaHei UI | 字母数字空格逗号连字符，≤64 | bar / card 全部、dsh 除应用名 | dsh 应用名固定 Segoe UI Semibold |
-| `layout` | bar | `bar`/`card`/`dsh` | — | 非法值一律落 bar |
-| `status` | '' | ≤40 字 | card / dsh | 状态行 / footer 文案；dsh 留空时显示倒计时与暂停提示，超长截 39 + … |
-| `eyebrow` | '' | ≤16 字 | card / dsh | card 下是小标题，dsh 下是应用名 |
+| 区域 | 行 | 作用 |
+|---|---|---|
+| param 与初始化 | 1-24 | -Quiet / -Diagnose / -Snapshot / -Serve；环境变量 title/body/timeout/logPath；Add-Type |
+| DshActions | 26-329 | FindDshWindow、FocusDsh、KeepTop、DumpWindows、NotificationState（SHQueryUserNotificationState）、IsDshForeground |
+| DshDpi | 331-378 | EnablePerMonitorV2（SetProcessDpiAwarenessContext -4 → SetProcessDpiAwareness 2 → SetProcessDPIAware）、ScaleFor(Screen)（GetDpiForMonitor） |
+| DshToast | 380-1550 | 单张卡片的窗口、样式、布局、绘制、动画、点击、快照 |
+| ReadStyle | 666-818 | 读取全部 DSH_NOTIFY_*，做 clamp、DPI 缩放、dsh 字号/配色派生 |
+| ComputeLayout | 820-922 | 三种版式的几何；dshCloseRect |
+| ComputePosition / ApplyStackOffset | 924-948 | 工作区角落定位、多卡纵向堆叠偏移 |
+| BuildStatic | 956-1072 | 投影、卡面、圆角、高光、描边、色条，然后分派到三种内容绘制 |
+| DrawCardContent | 1095-1171 | 图标板、eyebrow、标题、正文、状态行 |
+| DrawDshContent | 1173-1232 | 鲸鱼、应用名、标题、正文、footer 圆点、链接、关闭 × |
+| DrawDshFooterLabel | 1234-1254 | 三态 footer |
+| DrawWhale / WhalePts / WhaleCounts | 1256-1376 | 手绘鲸鱼 |
+| Render / PushLayered | 1377-1476 | 每帧合成透明度、进度条、状态环、dsh footer，UpdateLayeredWindow |
+| OnTick | 1478-1503 | 40ms 定时器，250ms 步进重绘，淡入 170ms / 淡出 240ms，超时关闭 |
+| ShowWithoutActivation / CreateParams / OnShown | 1505-1534 | 不抢焦点、分层窗口、首帧、提示音 |
+| SaveStatic | 1536-1550 | 静态快照 PNG |
+| DshCardSpec | 1552-1590 | 35 字段的宿主协议数据类 |
+| DshHost | 1593-1815 | 常驻宿主：stdin 线程、HostForm、ProcessLine、抑制判断、maxVisible、Relayout、Shutdown |
+| ApplyStyleEnv | 1817-1849 | 把 DshCardSpec 写成 DSH_NOTIFY_* 环境变量 |
+| 入口 | 1853-1878 | -Serve / -Diagnose / -Snapshot / 普通弹窗 |
 
----
+DshToast 内部几个关键字段：scale、cardW/cardH/bitmapW/bitmapH/shadowPad、opacity/shadowStrength/shine、progressOn/iconOn/fadeOn、layout/statusText/cardEyebrow/cardTitle/cardMode/statusOn/dshMode、dshAppText/dshLinkText、dshCloseRect。
 
-## 5. 运行时机制（排查问题时最常看）
+### 3.5 其他文件
 
-- **定位**：按光标所在显示器的 WorkingArea + corner 算卡片左上角，再减去 `shadowPad` 得到窗口位置；日志行 `popup screen=... work=... cursor=... corner=... card=... size=...`。
-- **DPI 与整体缩放**：入口处 `SetProcessDPIAware()`；`ScreenScale() = GetDeviceCaps(LOGPIXELSX) / 96`，200% 屏得 2；`ReadStyle():585-586` 再乘用户 `scale`（0.5–1.5）得到总系数 `s`，所有几何常量、字号、间距、圆角、投影都乘它。
-- **绘制**：每次重绘都从 `staticBmp`（预渲染的卡面）拷贝 + 透明度矩阵叠加，再画动态元素（进度条 / 扩散环 / dsh footer），最后 `UpdateLayeredWindow` 送显；窗口是 `WS_EX_NOACTIVATE`，不抢焦点。
-- **计时**：40ms 定时器；淡入淡出按 alpha 变化或每 250ms 步进才重绘（所以 footer 的倒计时是 4Hz 级别更新，视觉上够用）。鼠标进入暂停、离开累加 `pausedAccum`，`ElapsedMs()` 扣除暂停段。
-- **置顶**：每秒 `KeepTop` 一次，保证不被别的置顶窗口压住（日志里 1Hz 的 KeepTop 是正常的）。
-- **点击**：dsh 版式先判右上 × 热区（命中只关窗）；其余位置 → `FocusDsh`：找 DSH 窗口 → 若在不同虚拟桌面先切桌面 → 最小化才还原 → SetForegroundWindow → 关窗。
-- **提示音**：`DSH_NOTIFY_SOUND != '0'` 时 OnShown 播一次 `SystemSounds.Asterisk`。
-- **去重**：宿主侧同 key 1.5 秒内只弹一次（`show()` 298-308）；审批 watcher 另有 1500ms 去重。
+- cordis.patch.yml：向宿主插入 id=desktop-notify 的 bundle patch，config 里只放五个事件开关的初始值。
+- locale/zh.json、locale/en.json：目前只有 settings.section 的标题和描述，与版式无关。
+- icon.svg：设置页图标。
+- package.json：ESM、win32、node>=20、files 清单、dsh.bundle.patch、dsh.client 注入 @deepseek-ai/dsh-client-ui-settings、check 脚本检查 9 个 JS 文件。
 
 ---
 
-## 6. 事件 → 通知映射
+## 4. 配置：43 个字段
 
-| 事件 | 条件 | 标题 / 正文 | key |
+配置的唯一权威是 lib/schema.js 的 DEFAULTS + sanitize。任何入口（HTTP save、测试、导入、宿主 config、旧文件迁移）都必须经过 sanitize。
+
+### 4.1 事件与行为（14）
+
+| 字段 | 默认 | 范围/取值 | 说明 |
 |---|---|---|---|
-| `agent/status` | `status === 'idle'` 且 `config.onTurnEnd` 且是 root agent | DSH · 本轮完成 / 会话已空闲，切回去看看。 | idle |
-| `agent/error` | `config.onError` 且是 root agent | DSH · 出错了 / 有一个 agent 步骤失败。 | error |
-| `user-questions/request` | `config.onQuestion`；prepend 监听并 `next()` 透传 | DSH · 需要你回答 / 有个问题在等你。 | question |
-| `approval/asked`（全局 watcher） | `config.onApproval` | DSH · 需要你确认 / 等待你授权，点击查看 | approval |
-| 设置页「测试通知」 | 无 | DSH · 测试通知 / 这是当前设置的效果预览。 | test |
-| `onStartup` | 默认关 | DSH · 通知已就绪 / 插件已加载，点击可以切回会话。 | startup |
+| onTurnEnd | true | bool | 本轮完成 |
+| onQuestion | true | bool | 需要回答 |
+| onApproval | true | bool | 需要授权 |
+| onError | true | bool | 执行出错 |
+| onStartup | false | bool | 插件启动 |
+| quietEnabled | false | bool | 免打扰开关 |
+| quietStart | "22:00" | HH:MM | 免打扰开始；跨午夜时按跨午夜处理 |
+| quietEnd | "08:00" | HH:MM | 免打扰结束；与 start 相同视为关闭 |
+| suppressForeground | true | bool | DSH 在前台时不弹 |
+| suppressFullscreen | true | bool | 全屏 / 系统勿扰时不弹 |
+| respectFocusAssist | true | bool | 专注助手时不弹 |
+| maxVisible | 3 | 1-5 | 同屏上限；超出关闭最早一张 |
+| monitor | "cursor" | cursor/primary | 跟随鼠标所在屏或固定主屏 |
+| clickAction | "focus" | focus/none | 点击切回 DSH，或只关卡片 |
 
-正文会自动前置一行「会话：<会话标题>」（`index.js:178`）。
+### 4.2 外观（29）
 
----
+| 字段 | 默认 | 范围 | 说明 |
+|---|---|---|---|
+| layout | "dsh" | bar/card/dsh | 版式 |
+| accent | "#7c8ff0" | #rrggbb | 主色；语义色开启时会被事件色覆盖 |
+| background | "#ffffff" | #rrggbb | 卡片底色 |
+| text | "#111418" | #rrggbb | 主文字色 |
+| width | 620 | 240-720 | 逻辑宽度，最终乘 scale |
+| scale | 1 | 0.5-1.5 | 整体缩放 |
+| radius | 18 | 0-28 | 圆角 |
+| padX | 40 | 12-40 | 水平内边距；dsh 忽略 |
+| padY | 20 | 10-32 | 垂直内边距；dsh 忽略 |
+| accentWidth | 0 | 0-14 | 左侧色条；card/dsh 忽略 |
+| corner | "br" | tl/tr/bl/br | 弹出角落 |
+| marginX | 16 | 0-400 | 距屏幕水平边 |
+| marginY | 16 | 0-400 | 距屏幕垂直边 |
+| titleSize | 15 | 11-22，0.5 步 | 标题字号；dsh 会派生 |
+| bodySize | 15 | 10-20，0.5 步 | 正文字号；dsh 会派生 |
+| font | "Microsoft YaHei UI" | 5 个预设值 | 字体；只接受字母数字空格逗号连字符，≤64 字符 |
+| status | "" | ≤40 字 | 状态行文案；dsh 为空时用事件默认状态 |
+| eyebrow | "" | ≤16 字 | 小标题 / 应用名 |
+| durationMs | 20000 | 3000-120000，1 秒步 | 停留时长 |
+| sound | false | bool | 系统提示音 |
+| progress | false | bool | 进度条；仅 bar 生效 |
+| icon | true | bool | bar 的圆点 / card 的图标板；dsh 固定鲸鱼 |
+| fade | true | bool | 淡入淡出；reduceMotion 会关闭 |
+| shadow | 0 | 0-1 | 投影强度 |
+| shine | 0.02 | 0-0.3 | 顶部高光 |
+| opacity | 1 | 0.5-1，0.01 步 | 整卡不透明度 |
+| reduceMotion | false | bool | 减少动效，关闭 fade |
+| highContrast | false | bool | 高对比；也会读取系统高对比 |
+| semanticColor | true | bool | 事件语义色；关闭后统一用 accent |
 
-## 7. 构建与验证手册
+### 4.3 数值限制汇总
 
-```powershell
-cd "D:\dsh work\dsh-desktop-notify-win"
-npm run check          # node --check index.js && node --check client.js
-```
+| 字段 | min | max | 步长 |
+|---|---|---|---|
+| width | 240 | 720 | 10（保存取整） |
+| durationMs | 3000 | 120000 | 1000 |
+| marginX / marginY | 0 | 400 | 1 |
+| opacity | 0.5 | 1 | 0.01 |
+| radius | 0 | 28 | 1 |
+| padX | 12 | 40 | 1 |
+| padY | 10 | 32 | 1 |
+| accentWidth | 0 | 14 | 1 |
+| titleSize | 11 | 22 | 0.5 |
+| bodySize | 10 | 20 | 0.5 |
+| shadow | 0 | 1 | 0.01 |
+| shine | 0 | 0.3 | 0.01 |
+| scale | 0.5 | 1.5 | 0.05 输入、0.01 保存取整 |
+| maxVisible | 1 | 5 | 1 |
 
-PowerShell 侧（`notify.ps1` 是纯 ASCII，但优先用 AST 解析 + 实际出图双重验证）：
+### 4.4 语义色与预设
 
-```powershell
-$errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile('D:\dsh work\dsh-desktop-notify-win\notify.ps1', [ref]$null, [ref]$errors) | Out-Null
-"parse errors = " + $errors.Count
-```
+SEMANTIC_ACCENTS：
 
-出快照图（不弹窗，直接把静态帧写成 PNG；dsh 下会自动补画 footer。整体缩放用 `DSH_NOTIFY_SCALE`（0.5–1.5），例如 `0.7` 出 70% 的图）：
-
-```powershell
-$env:DSH_NOTIFY_TITLE='未能完成操作'
-$env:DSH_NOTIFY_BODY="启动器未能开始操作：" + [char]10 + "PowerShell 7 路径失效，请查看工具目录中的 settings.json。"
-$env:DSH_NOTIFY_LAYOUT='dsh'
-$env:DSH_NOTIFY_BG='#fdfdfe'; $env:DSH_NOTIFY_TEXT='#262b35'
-$env:DSH_NOTIFY_WIDTH='531'; $env:DSH_NOTIFY_RADIUS='15'
-$env:DSH_NOTIFY_SCALE='1'          # 0.5–1.5，整体缩放
-$env:DSH_NOTIFY_TITLE_SIZE='15'; $env:DSH_NOTIFY_BODY_SIZE='13'
-$env:DSH_NOTIFY_SHADOW='0.15'; $env:DSH_NOTIFY_SHINE='0'
-$env:DSH_NOTIFY_PROGRESS='0'; $env:DSH_NOTIFY_ACCENT_W='0'
-$env:DSH_NOTIFY_FONT='Microsoft YaHei UI'; $env:DSH_NOTIFY_EYEBROW='DeepSeek Harness'
-$env:DSH_NOTIFY_STATUS=''          # 留空才会出倒计时态
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\notify.ps1 -Snapshot 'D:\dsh work\notify-layout-dsh.png'
-```
-
-宿主是否已加载新构建（不用重启即可判断）：
-
-```powershell
-(Invoke-WebRequest 'http://127.0.0.1:2940/dsh-desktop-notify/api/config' -UseBasicParsing).Headers['x-dsh-notify-build']
-```
-
-日志怎么看：
-
-- `notify-debug.log`（UTC）：`apply version=5 build=19 route=...` 出现即插件已加载；`test-preview` 会打印完整配置；`settings-saved` 打印落盘内容；`spawn-error` / `exit` 打印弹窗进程结果。
-- `notify-click.log`（本地 +08）：每次弹窗的 `popup ... card=... size=...`、`layout card=WxH bitmap=WxH scale=... bodyLines=...`、`click handler` / `close-click`、以及每秒 `KeepTop`。
-
----
-
-## 8. 构建变化记录（BUILD 17 → 18 → 19）
-
-### 8.0 BUILD 17 相对 BUILD 16 的变化
-
-1. **新增第三套版式 `dsh`**：`index.js` sanitize 接受 `dsh`；`notify.ps1` 增加 596-598 的版式判定、607-701 的 dsh 样式分支、708-736 的 dsh 布局、881-900 的双层差分描边、917-918 的分派、1043-1124 的 dsh 绘制与 footer、805 的关闭热区、572 的热区命中、1284 的每帧 footer、1405-1418 的静态帧补画。
-2. **设置页三选一**：`client.js:1044-1067` 增加 dsh 按钮；`status` / `eyebrow` 两个字段在 dsh 下换成「状态行文案」「应用名」语义（1068-1092）；预览 DOM 增加 dsh 分支（723-839）。
-3. **新增第 8 套预设「DSH 原生」**：`client.js:257-285`。
-4. **`node --check` 与 AST 解析均通过；dsh 版式已在真实宿主跑通**（`notify-debug.log` 18:40 两次 `test-preview layout "dsh"` + `shown` + `exit code 0`）。
-5. **文档**：`README.md` 由「7 套预设 / 两套版式」更新为「8 套 / 三套」并补 dsh 段；补 `HANDOFF.md`（= 本文档）。
-
-### 8.1 BUILD 18 相对 BUILD 17 的变化（2026-11-11 12:5x）
-
-1. **dsh footer 按拍板 B 接线**：`index.js:214` 把状态环境变量改成
-
-   ```js
-   DSH_NOTIFY_STATUS: settings.status || (settings.layout === 'dsh' ? '' : STATUS_TEXT[key] || STATUS_TEXT.idle),
-   ```
-
-   dsh 版式下 `status` 留空 → 传空串 → `notify.ps1:1108-1115` 的三态生效（倒计时 / 悬停暂停）；`status` 填了就照旧显示自定义文案。bar / card 行为不变。
-2. **`BUILD` 17 → 18**：宿主响应头 `x-dsh-notify-build` 变成 18，用来确认是否已加载新代码；改完必须重启宿主（或重载插件）才生效。
-3. **验证**：用打桩 `spawn` 的注入测试驱动 `apply()`，六种场景的环境变量全对——dsh 空 → `''`、dsh 自定义 → 原样、card 空 → 「点击卡片切回会话」、bar 空（question 事件）→ 「正在等待你的回答」、设置页测试按钮 dsh 空 → `''`、测试按钮 dsh 自定义 → 「悬停可看日志」；响应头 `x-dsh-notify-build` 报 18。`npm run check` 与 AST 解析均通过。
-4. **文档**：本文档 2.3 / 3.1 / 4 / 7 / 8.1 / 9.1 / 10 节与 `README.md` 同步更新。
-
-### 8.2 BUILD 19 相对 BUILD 18 的变化（2026-11-11 13:1x）
-
-背景：用户反馈「弹窗还是太大，调宽度没用」。实测确认 `width` 在 dsh 下确实生效（400 → 852 物理像素、530 → 1112、600 → 1252），但 dsh 的字号、图标、间距、行高按参考卡锁死，只缩宽度看起来变化不大，所以新增整体缩放。
-
-1. **新增配置字段 `scale`**（0.5–1.5，默认 1）：`index.js` 的 `DEFAULTS`（15-42，`scale: 1` 在 41 行）与 `sanitize()`（86-115，114 行 clamp）各一处；`showCard()` 216 行新增环境变量 `DSH_NOTIFY_SCALE`。
-2. **渲染侧统一缩放**：`notify.ps1:585-586` 把 `ScreenScale()` 乘以 `DSH_NOTIFY_SCALE` 后再赋给 `scale`，后续所有几何、字号、间距、圆角、投影都走同一个 `s`，所以三套版式（bar / card / dsh）一起等比缩放，不存在只缩卡片不缩文字的问题。
-3. **设置页滑杆**：`client.js:1144-1153` 在「颜色与大小」的「卡片宽度」后新增「整体缩放」，min 0.5 / max 1.5 / step 0.05，显示为百分比；预览按 `scale` 同比缩放，放大超过 100% 时只画到原始尺寸，避免溢出裁切（513-514 行）；预览底部信息行同步显示「缩放 N%」（1101-1110）。
-4. **实测尺寸**（200% 屏、dsh 版式、width 530）：100% → 位图 1112×561（卡 1062×509）、70% → 780×396、130% → 1446×730；bar 版式 width 400、80% → 652×181。三档并排见 `notify-scale-compare.png`。
-5. **注入测试**：默认 `scale=1`、config 0.75、POST 2 → 1.5、POST 0.2 → 0.5、POST 缺字段沿用旧值，环境变量与 GET config 全部正确；`npm run check` 与 AST 解析通过。
-6. **文档**：`README.md` 增加 `scale` 字段说明与 BUILD 19 记录；本文档新增 2.4 / 8.2 节并同步全篇行号。
-
----
-
-## 9. 已知偏差与待决策
-
-### 9.1 dsh footer 的语义（已拍板：方案 B，BUILD 18 已实现）
-
-- 决定（2026-11-11 12:5x）：**B —— 恢复倒计时**。dsh 版式下 `status` 留空时 `DSH_NOTIFY_STATUS` 传空串，footer 走「N 秒后收起 · 悬停可保留」与「已暂停 · 移开继续」两态；`status` 填了就显示自定义文案。
-- 理由：设置面板（`client.js:1068`）和预览（`client.js:561`）本来就是「留空显示倒计时」的语义，B 让真实弹窗与面板、预览三者一致；同时保留自定义文案作为可选覆盖。
-- 实现：`index.js:214` 一行三元判断（见 8.1）；`notify.ps1` 与 `client.js` 无需改动。
-- 被否的方案：A（保持现状、只改面板文案）真实卡永远不是原生倒计时；C（照原生硬编码「查看日志 ›」）要给 dsh 补日志动作，超出本次范围。
-- 遗留取舍：dsh 版式下默认不再显示事件类型（本轮完成 / 需要你回答），要显示就在设置里填 `status`；更细的控制可以以后按方案 3 拆出独立的 `footer` 字段。
-
-### 9.2 其他偏差（都能用，只是要知道）
-
-1. **dsh 版式下 `icon` 开关无效**：`DrawDshContent` 无条件画图标板 + 鲸鱼，不读 `iconOn`。面板上那个开关切了没反应。
-2. **dsh 版式下 `accentWidth`、`progress`、`radius`、`shine` 被覆盖**：`notify.ps1:642-643` 强制 `progressOn=false`、`accentW=0`；dsh 不画高光；圆角按参考卡比例，不走 `radius` 设置。面板目前没有对这些字段做禁用/隐藏，属于「调了不生效」的观感问题，建议后续在 `client.js` 里按版式隐藏或置灰。
-3. **dsh 链接文案硬编码**：`notify.ps1:698` 固定「点击切回 ›」，`eyebrow` 只改应用名，不能改链接。
-4. **dsh 下日志 `bodyLines=0`**：构造函数日志用 `bodyLineH`（bar/card 变量）当分母，dsh 用的是 `dshBodyLineH`，所以这条日志对 dsh 没意义；排查行数请直接看正文渲染或改日志字段。
-5. **预览与真实渲染的关闭 × 位置略有差异**：预览是 `right:25 / top:33 / 15×15` 的盒子，真实渲染中心在「距右 39、距顶 41」、臂长 5、笔宽 2；视觉近似而非像素级一致（预览本来就声明「按比例缩放，真实卡片以弹窗为准」）。
-6. **`HANDOFF.md` 之前不存在**：README 一直链向它。本次已把本文档放进插件目录补上。
-7. **双屏跟随未实机验证**：代码与单屏日志（`screen=\\.\DISPLAY1 work=3840×2064`）都正常，真·双屏仍需实机试一次。
-8. **`sanitize()` 不回落 `base.layout`**（`index.js:111`：`next.layout = source.layout === 'card' || source.layout === 'dsh' ? source.layout : 'bar'`）：payload 里没带 `layout` 就掉回 bar，而不是沿用上一次的版式。真实设置页每次 POST 都发完整 settings，所以当前不触发；以后若加「局部更新」类调用，要先补回落逻辑。测试时踩过一次（传 `settings:{}` 导致版式变 bar），非线上问题，未改。
-9. **`scale` 与 `width` 是两套控制，不能只缩文字**：`scale` 等比缩放整张卡（字号、图标、间距一起变），`width` 只改卡宽与正文换行。想「卡宽不变、字更大」目前做不到；如果以后需要，得把字号从 `scale` 里拆出来单独乘（预估要动 `ReadStyle()` 里每个字号派生处）。另外预览在 `scale > 1` 时只画到 100% 尺寸，所见不等于最终大小，属刻意防裁切，不是 bug。
-
----
-
-## 10. 下一步建议（按价值排序）
-
-1. ~~拍板 9.1 并改代码~~ —— 已完成：方案 B 随 BUILD 18 落地（见 8.1）；整体缩放随 BUILD 19 落地（见 8.2）。两者都要重启宿主才生效。
-2. **重启宿主确认 BUILD 19**：`(Invoke-WebRequest ...).Headers['x-dsh-notify-build']` 应报 19；然后弹一张真实通知，把「整体缩放」从 100% 调到 70%–85% 找一个舒服的大小。
-3. 面板按版式隐藏 / 置灰无效字段（icon、accentWidth、progress、radius、shine 在 dsh 下）。
-4. 双屏实机跑一次，确认「跟随鼠标显示器 + 虚拟桌面切换」在混合 DPI 下的表现（含不同显示器各自的 `scale`）。
-5. 若打算发布：`package.json` 里 `files` 补 `HANDOFF.md`，README 的安装段和 GitHub 仓库同步。
-6. 可选：给 `-Snapshot` 增加 `-SnapshotScale`（强制 1x/2x 出图），调样式时比对更方便；现在只能靠 `DSH_NOTIFY_SCALE` 改图的逻辑尺寸。
-
----
-
-## 11. 文件与路径速查
-
-| 路径 | 说明 |
+| 事件 | 颜色 |
 |---|---|
-| `D:\dsh work\dsh-desktop-notify-win\` | 插件唯一真源 |
-| `index.js` / `client.js` / `notify.ps1` | 三个核心文件（宿主 / 设置页 / 渲染） |
-| `settings.json` | 实时配置（dsh 版式，485 字节，含 `scale`） |
-| `notify-debug.log` / `notify-click.log` | 两份运行日志（不入库） |
-| `HANDOFF.md` | 本文档副本 |
-| `D:\dsh work\dsh-error-card.html` | dsh 版式的几何/配色基准（HTML 复刻） |
-| `D:\dsh work\dsh-error-card-preview.png` / `dsh-error-card-compare.png` | 基准卡的渲染与对照图 |
-| `D:\dsh work\notify-dsh-compare.png` | 原生卡 vs 插件 dsh 版式并排图（2208×566） |
-| `D:\dsh work\notify-scale-compare.png` | 整体缩放 70% / 100% / 130% 并排图（3442×830） |
-| `D:\dsh work\notify-layout-dsh.png` | dsh 版式预览（倒计时态，1114×561） |
-| `D:\dsh work\notify-layout-dsh-status.png` | dsh 版式预览（状态文案态，1114×561） |
-| `D:\dsh work\notify-layout-bar.png` / `notify-layout-card.png` / `notify-card-build16.png` | 更早的版式截图 |
-| `D:\dsh work\dsh-desktop-notify-win-交接文档.md` | BUILD 16 的旧交接文档（只覆盖 bar/card，保留备查） |
+| turnEnd | #7c8ff0 |
+| question | #d99a2b |
+| approval | #d97b2b |
+| error | #d9534f |
+| startup | #3ba55d |
+| test / replay | #7c8ff0 |
+
+八套预设：classic 经典深色、light 系统浅色、mono 极简灰、contrast 高对比、frost 霜白圆角、neon 午夜霓虹、cpamc 卡片版式、dsh DSH 白卡。预设只是 values 的部分覆盖，应用时与当前配置合并，再走 sanitize。dsh 预设的关键值是 accent #b96060、background #fdfdfe、text #262b35、width 531、radius 15、padX 28、padY 31、accentWidth 0、titleSize 15、bodySize 13、shadow 0.15、shine 0、progress false、icon true、fade true、layout dsh、durationMs 20000。
+
+### 4.5 sanitize 的语义
+
+- 以 base 为底，base 默认 DEFAULTS；只处理已知键，未知键丢弃。
+- 颜色必须是 #rrggbb，否则回落 base。
+- 数值 clamp 后按字段取整：width/margin/radius/pad/accentWidth/maxVisible 整数；durationMs 按秒；titleSize/bodySize 按 0.5；opacity/shadow/shine/scale 按 0.01。
+- bool 字段在 undefined/null 时保留 base，否则 Boolean()。
+- layout 只认 bar/card/dsh，非法值回落 base.layout（旧版曾错误地强制回落 dsh，已修）。
+- monitor 只认 primary，其余 cursor；clickAction 只认 none，其余 focus。
+- quietStart/quietEnd 必须是 HH:MM，否则回落 base。
+- font 只允许 [A-Za-z0-9 ,-]，长度 ≤64。
+- status 超过 40 字、eyebrow 超过 16 字时截断并加省略号。
+- isQuietHours 支持跨午夜；起止相同视为不启用。
+- eventEnabled 对未知事件返回 true，保证 test/replay 等内部事件不被开关挡住；挡事件开关的逻辑在 service 里只对五类真实事件生效。
 
 ---
 
-## 12. 加一个字段的清单（改这插件最容易漏的地方）
+## 5. 运行时
 
-1. `index.js`：`DEFAULTS` 加默认值 → `sanitize()` 加范围 → `showCard()` 加一行环境变量 `DSH_NOTIFY_XXX`（`scale` 就是这样加的，可照抄：41 / 114 / 216 行）。
-2. `notify.ps1`：`ReadStyle()` 里用 `EnvInt`/`EnvDouble`/`EnvFlag`/`Env` 读出来并 clamp → 需要的话在 `ComputeLayout()` 用上 → 在绘制函数里用上。
-3. `client.js`：表单控件加到对应分区（`patch({xxx})`）→ 预览 DOM 里用上 → 想进预设就把值写进预设项（预设是「完整快照」，漏一项会继承旧值）。
-4. `index.js` 的 `BUILD` 加 1，否则宿主分不清是否已重载；宿主响应头就是它。
-5. `npm run check` + AST 解析 + `-Snapshot` 出图看一眼；改动大就跑一次真实通知（设置页「测试通知」）。
-6. `README.md` 的「本地改造记录」和本文档同步补一行；如果新字段影响预览或缩放，还要改 `client.js` 的预览与滑杆。
+### 5.1 插件加载
+
+apply 的顺序：
+
+1. resolvePaths(env) 得到 dataDir 和各文件路径。
+2. createLogger(paths.log) 建日志。
+3. new SettingsStore({paths, log}).load(ctx.config)：data 目录 settings.json 优先；没有则读插件目录 settings.json 迁移；都没有用 DEFAULTS。
+4. new HistoryStore(paths.history)。
+5. getRendererHost({log, clickLog: paths.clickLog})：进程内单例。
+6. new NotificationService(...)，传入 settings、history、host、log、previewAgent。
+7. 注册事件、HTTP 路由、startup timer、cleanup。
+
+宿主 config 里的五个事件开关作为 legacy seed 传入。合并顺序是 DEFAULTS → legacy → data 文件，data 文件覆盖 legacy，所以用户在设置页关掉的事件不会被宿主默认配置重启回 true。
+
+迁移只发生一次：data 目录没有 settings.json 且插件目录有旧文件时，sanitize 后原子写入 data 目录，loadedFrom='migrated'，旧文件保留。之后保存都写 data 目录，loadedFrom='data'。插件目录的旧 settings.json 不会随包发布（files 不含它），所以新装用户直接使用 DEFAULTS。
+
+### 5.2 通知流程
+
+service.notify(event, options) 的顺序（lib/service.js:84）：
+
+1. compose：根据版式生成 title/body/status/eyebrow。
+2. 建 entryBase：event、title、body、status、agentId、sessionTitle、shown=false。
+3. 非 force 且事件开关关闭 → 写历史，suppressed='disabled'，返回。
+4. 非 force 且 isQuietHours → 写历史，suppressed='quiet'，返回。
+5. 非 force 且同 key 1500ms 内重复 → 写历史，suppressed='coalesced'，返回。key = event:agentId（没有 agentId 时用 event 本身）。
+6. 生成 id = 'n' + base36(now) + '-' + counter。
+7. 组装 payload：cmd=show、全部外观字段、monitor、clickAction、maxVisible、highContrast、reduceMotion、suppress*；force 时三个 suppress* 全设为 false。
+8. 先写一条 shown=true 的历史，再 host.show(payload)。
+9. 宿主返回 shown=true → 记 notified 日志；返回 skipped → 历史改为 shown=false、suppressed=reason；异常 → suppressed='error'。
+10. 返回 entry。
+
+因此历史的写入时机是“尝试显示之后”，即使最终被宿主抑制也有记录。UI 里显示“未显示 · 原因”就是读 suppressed 字段。
+
+turnEnd 有额外的 250ms 去抖（scheduleTurnEnd）：同一 agent 在 250ms 内多次 idle 只弹一次。这是为了避免 agent/status 抖动导致连弹。
+
+### 5.3 常驻渲染宿主
+
+renderer-host.js 在第一次 show 时 spawn：
+
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File notify.ps1 -Serve
+
+stdio 全部 pipe，环境变量继承 process.env，再叠加 DSH_NOTIFY_LOG=clickLog（如果配置了）。宿主读完 Load 事件后输出 ready。
+
+协议是 stdin/stdout 的 JSON 行：
+
+宿主 → 插件：
+
+    {"evt":"ready","pid":12345}
+    {"evt":"shown","id":"n..."}
+    {"evt":"skipped","id":"n...","reason":"foreground"}
+    {"evt":"dismissed","id":"n...","by":"timeout"}
+    {"evt":"error","message":"..."}
+    {"evt":"bye"}
+
+插件 → 宿主：
+
+    {"cmd":"show","id":"n...","title":"...","body":"...","status":"...","eyebrow":"...","layout":"dsh", ...}
+    {"cmd":"clear"}
+    {"cmd":"ping"}
+    {"cmd":"quit"}
+
+时序细节：
+
+- READY_TIMEOUT 15s，SHOW_TIMEOUT 12s；ready 超时会 kill 进程。
+- 每个带 id 的 show 挂一个 pending，收到 shown/skipped/error 时 resolve。
+- stdout 用 StringDecoder 解码，避免中文 JSON 跨 chunk 被截成非法 UTF-8；按行 parse。
+- 宿主退出时 failPending，下一次 show 重新 ensure；restarts 超过 2 次后 available=false，后续直接走一次性回退。
+- dispose 时发 quit 并 end stdin，800ms 后 kill。
+
+宿主内部：
+
+- stdin 线程逐行 ReadLine 入 ConcurrentQueue，EOF 入 __EOF__；HostForm 是 1×1 屏外、Opacity=0 的常驻窗口，40ms 定时器每 tick 最多处理 20 行。
+- show 先过 SuppressionReason：suppressFullscreen 且 NotificationState 为 2/3/4/7 → fullscreen；respectFocusAssist 且 state 为 6 → quiet；suppressForeground 且 IsDshForeground → foreground。命中发 skipped，不建卡片。
+- maxVisible clamp 1-5；cards.Count >= maxVisible 时关闭 cards 末尾最老的一张，CloseReason='replaced'，没有等待队列。
+- 卡片显示后发 shown；FormClosed 时从 cards 移除、Relayout、发 dismissed，by 默认 'closed'。
+- 多卡纵向堆叠：Relayout 按 cards 顺序 ApplyStackOffset，offset += WindowHeight + 2。
+- quit 时 CloseAll("shutdown")、发 bye、Application.Exit。
+
+CloseReason 取值：dsh 右上 × 是 close，普通点击是 click，右键是 dismiss，超时是 timeout，被替换是 replaced，clear 是 clear，shutdown 是 shutdown。dsh 点击处理先判关闭热区，命中只关窗；否则 clickAction != 'none' 时 FocusDsh 再 Close。FocusDsh 会切虚拟桌面并聚焦，尽量不改变窗口大小。
+
+### 5.4 HTTP API
+
+路由前缀 /dsh-desktop-notify/api，所有请求先走 connection.requestRejection（401/403 时返回 unauthorized）。请求体上限 64KB，超限返回 413。响应头带 x-dsh-notify-build。
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | /meta | version、build、defaults、limits、presets、events、fonts、semanticAccents |
+| GET | /config 或 / | version、build、settings、history、loadedFrom、dataDir |
+| GET | /history | history 数组 |
+| POST | /config action=save | sanitize + 原子写 + service.updateSettings；返回落盘后的 settings |
+| POST | /config action=test | sanitize(body.settings, 当前 settings) 后 service.preview；不落盘 |
+| POST | /config action=replay | 按 id 查历史并强制重播；找不到返回 404 |
+| POST | /config action=clear | 清空历史文件 |
+
+错误：未知 action 400；未知路由 404；body-too-large 413；其他异常 500 并记 route-error 日志。
+
+### 5.5 预览与重播
+
+- preview(settings) 用 previewAgent 的上下文，force=true，临时 settings，不写配置；事件类型是 test。force 会跳过事件开关、免打扰、合并，并把宿主抑制全关。
+- replay(id) 从历史里找 entry，原事件如果是 test 就按 test 重播，否则按 replay；文案沿用历史里的 title/body/status，force=true。所以重播不受当前事件开关和抑制影响。
+- 预览页的 ToastPreview 是前端独立实现，不是真的调用 notify.ps1；它按表单当前值渲染，用于快速调样式。预览与真实渲染的差异见 9.2。
+
+### 5.6 历史与日志
+
+history.json：{entries:[...]} 或数组，最多 50 条，新的在头部，原子写（.tmp-pid → rename）。字段：id、at、event、title、body、status、agentId、sessionTitle、shown、suppressed。UI 只显示最近 30 条，可以清空（两段确认）和重播。
+
+notify.log：JSON 行，字段 t + evt + 其他。常见 evt：apply、settings-saved、settings-migrated、settings-migrate-error、notified、notify-skipped、notify-error、history-error、route-error、approval-dispatch、renderer-* 等。文件超过 256KB 时截断。
+
+notify-click.log：notify.ps1 自己写的点击/弹出日志，由 DSH_NOTIFY_LOG 指定；常驻宿主用 clickLog 路径启动，一次性回退同时传 LOG 和 CLICK_LOG。
+
+### 5.7 资源与生命周期
+
+- 空闲时只有 DSH 进程里的 JS，无轮询、无网络。
+- 第一张卡片出现时启动一个常驻 powershell.exe；之后复用。宿主自己有一个 40ms 的 WinForms 定时器（只在宿主进程里），卡片全部关闭后仍常驻，直到插件 dispose 或 DSH 退出。
+- 连续启动失败 3 次（restarts 超 2）后放弃常驻，只走一次性弹窗；一次性弹窗是 spawn powershell -File notify.ps1，stdio ignore、unref。
+- 插件 dispose / DSH 退出 → renderer-host dispose 发 quit；PowerShell 在 stdin EOF 时也会自行退出，避免孤儿进程。
+- 多个 DSH 进程各自维护一个 renderer-host 单例，互不影响。
+
+---
+
+## 6. 事件映射
+
+| 事件 | 触发 | 文字（dsh 版式） | 文字（bar/card 版式） | 语义色 |
+|---|---|---|---|---|
+| turnEnd | 根 agent 进入 idle，250ms 去抖 | 标题=会话标题或“本轮完成”；正文=会话已空闲，切回去看看。；状态=本轮完成 · 切回继续 | 标题=DSH · 本轮完成；正文=「会话标题」会话已空闲，切回去看看。 | #7c8ff0 |
+| question | user-questions/request waterfall，prepend | 标题=会话标题或“需要回答”；正文=Agent 在等你的回答。；状态=等待你的回答 | 标题=DSH · 需要回答；正文=「会话标题」Agent 在等你的回答。 | #d99a2b |
+| approval | session/event 的 approval/asked；工具名可用时正文替换为“工具「X」在等授权。” | 标题=会话标题或“需要确认”；状态=等待你的确认 | 标题=DSH · 需要确认 | #d97b2b |
+| error | 根 agent 的 agent/error | 标题=会话标题或“执行出错”；正文=错误消息或“有一个 agent 步骤失败了。”；状态=执行出错 | 标题=DSH · 执行出错 | #d9534f |
+| startup | 插件 apply 后 800ms（onStartup=true） | 标题=会话标题或“已就绪”；状态=已就绪 | 标题=DSH · 已就绪 | #3ba55d |
+| test | 设置页测试按钮 | 标题=测试通知；状态=测试通知 | 标题=DSH · 测试通知 | #7c8ff0 |
+| replay | 历史重播 | 标题=历史重播；状态=历史重播 | 标题=DSH · 历史重播 | #7c8ff0 |
+
+补充：
+
+- dsh 版的 title 优先用会话标题，会话标题会被 cleanTitle 处理（去 Markdown 标记、空白归一、最多 60 字）。没有会话标题时用事件 label。
+- dsh 版的 eyebrow 优先用 settings.eyebrow，空则 DeepSeek Harness。
+- dsh 版的 status 优先用 settings.status，空则事件默认 status。所以真实卡片不会显示倒计时。
+- 非 dsh 版的 status 只用 settings.status，默认空；card 有 status 时才画状态行，bar 永远不画。
+- message 参数（例如工具授权文案）优先于默认 body；error 会传 errorMessage。
+- 事件开关关闭、免打扰、合并、宿主抑制都只影响“弹不弹”，历史仍然记，shown=false 加原因。
+
+---
+
+## 7. 构建与验证
+
+没有编译步骤。发布前至少跑完下面四组。
+
+### 7.1 语法检查
+
+    cd "D:\dsh work\dsh-desktop-notify-win"
+    npm run check
+
+这会 node --check index.js、client.js 和 lib 下 7 个模块，共 9 个文件。0 退出码即通过。
+
+PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
+
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+      "D:\dsh work\dsh-desktop-notify-win\notify.ps1",
+      [ref]$null, [ref]$errors) | Out-Null
+    if ($errors.Count -gt 0) { $errors } else { "ok" }
+
+历史上还检查过 notify.ps1 非 ASCII 字节为 0，因为 Windows PowerShell 5.1 对无 BOM 的 UTF-8 中文注释可能按 ANSI 解读，导致解析错误。修改脚本时保持纯 ASCII，中文用 \u 转义或外层字符串。
+
+### 7.2 模块与路由测试
+
+临时测试脚本在 D:\dsh work\_bn20（发布前可删除，下面是用途）：
+
+- verify-modules.mjs：22 项，覆盖 schema sanitize、quiet 时段、presets、history 原子写、config 迁移和 save 后 loadedFrom、log 截断、paths。
+- verify-index.mjs：13 项，假 webServer/connection 走 HTTP 路由，覆盖鉴权、meta/config/history、save/test/replay/clear、404、413、approval watcher。
+- verify-renderer.mjs：4 项，覆盖常驻宿主 ready/shown、available=false 时一次性回退、非 win32 拒绝、中文跨 chunk 解码。
+- render-client.mjs：用假 React 和假 ModuleLoader 渲染设置页，六组（bar/card/dsh × advanced false/true），检查六段标题、控件数量、预览文案、历史抑制文案。
+
+运行方式：
+
+    node "D:\dsh work\_bn20\verify-modules.mjs"
+    node "D:\dsh work\_bn20\verify-index.mjs"
+    node "D:\dsh work\_bn20\verify-renderer.mjs"
+    node "D:\dsh work\_bn20\render-client.mjs"
+
+2026-11-11 的基线：22/22、13/13、4/4；设置页六组全部六段齐全，basic 15 inputs / 31 buttons，advanced 41 inputs / 35 buttons（加 corner/margin 后）。
+
+### 7.3 静态快照
+
+不弹窗，直接把一帧写成 PNG：
+
+    $env:DSH_NOTIFY_LAYOUT = "dsh"
+    $env:DSH_NOTIFY_WIDTH = "531"
+    $env:DSH_NOTIFY_BG = "#fdfdfe"
+    $env:DSH_NOTIFY_TEXT = "#262b35"
+    $env:DSH_NOTIFY_TITLE = "整理本周计划"
+    $env:DSH_NOTIFY_BODY = "会话已空闲，切回去看看。"
+    $env:DSH_NOTIFY_STATUS = ""
+    powershell -NoProfile -File .\notify.ps1 -Snapshot .\snap.png
+
+-Snapshot 只创建 DshToast 并 SaveStatic，不启动宿主。适合调几何和颜色；三条版式都可以这样看。status 留空时 dsh footer 才会画倒计时；填了 status 就画那行字。注意环境变量要在同一个 powershell 进程里设置，或者用 Start-Process 的环境块。
+
+### 7.4 宿主协议冒烟
+
+用 Node 启动工作副本的 notify.ps1 -Serve，发送一行 show，读取 ready→shown，再发 quit，检查 dismissed/bye。测试脚本 test-host.mjs 曾验证过这条路径（exit 0，约 3 秒）。如果要重新写，关键点是：spawn 时 stdio 全 pipe，stderr 也读走避免阻塞；show 的 id 自己生成；收到 shown 后发 quit；退出码应为 0。
+
+### 7.5 真机 UI 验证清单
+
+部署到 desktop profile 后，逐项确认：
+
+1. 设置页出现“桌面通知”，标题显示 v0.5.0 · BUILD 20 和 dataDir。
+2. 六个分段都在；展开外观细节能看到 corner、marginX、marginY、色条宽度。
+3. 切换三种版式，右侧预览跟着变；dsh 预览有鲸鱼、DeepSeek Harness、状态行。
+4. 点测试通知，真实卡片出现；点保存后改一个颜色，再测试，颜色变化。
+5. 保存一次，重启 DSH，设置仍在；数据目录出现 settings.json。
+6. 触发一次真实 turnEnd（或 startup），历史里出现记录。
+7. 把 DSH 切到前台再测试，若 suppressForeground=true，历史显示“未显示 · DSH 在前台”。
+8. 把 maxVisible 设为 1，连续测试两条，第一张应被替换。
+9. 点击真实卡片，确认能切回 DSH；再点 dsh 右上 ×，确认只关卡片不切桌面。
+10. 检查 notify.log 和 notify-click.log 没有持续报错，宿主没有每次弹窗都新建进程。
+
+---
+
+## 8. 变更记录
+
+### 8.1 BUILD 17
+
+三种版式（bar/card/dsh）打通。dsh 版式按 D:\dsh work\dsh-error-card.html 的参考图复刻：白底、圆角 15、51px 图标板、手绘鲸鱼、Segoe UI Semibold 应用名、四层文字、红点状态行、右上 ×。新增 -Snapshot 快照模式。旧 HANDOFF 里 2.x 的几何数据主要来自这一轮。
+
+### 8.2 BUILD 18
+
+dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计时或悬停暂停文案。当时的目标是让状态行可选、空闲时看倒计时。BUILD 20 的 service 为了给 dsh 卡片一个稳定的状态文案，重新在 dsh 下填了事件默认 status，所以方案 B 在真实通知里被覆盖。这是需要重新决策的设计点，不是 bug，详见 9.1。
+
+### 8.3 BUILD 19
+
+整体缩放 scale（0.5-1.5），DPI 改为 Per-Monitor V2，预览防裁切，dsh 几何乘 scale。实测 70%/100%/130% 的尺寸与预期一致。设置页仍为旧版单列分区，index/client 仍是单文件。
+
+### 8.4 BUILD 20（当前）
+
+架构：
+
+- index.js 从 421 行缩到 317 行，通知编排搬进 lib/service.js。
+- 新增 lib/schema.js、config.js、history.js、log.js、paths.js、renderer-host.js。
+- notify.ps1 新增 -Serve 常驻宿主（DshHost + HostForm + stdin JSON 行协议），一次性弹窗保留为回退。
+- 配置和历史迁移到 DSH_HOME/desktop-notify。
+
+行为：
+
+- 五类事件开关；startup 默认关。
+- 免打扰时段（支持跨午夜）、DSH 前台、全屏/勿扰、专注助手四层抑制。
+- 1500ms 同 key 合并；maxVisible 1-5；点击行为 focus/none。
+- 历史 50 条，记录抑制原因，支持重播。
+- 预览、测试、保存、导入导出、恢复默认（两段确认）。
+- WCAG 对比度提示与一键改字色。
+- 高对比、减少动效；高对比会强制不透明、无阴影/高光、无动画、无进度条。
+
+渲染：
+
+- dsh 卡片的 radius 和 shine 现在真正生效（旧文档说被固定值覆盖，已不成立）。
+- dsh 的 progress 和 accentWidth 强制关闭；padX/padY/icon 被忽略；状态点颜色由 accent 决定（默认语义色）。
+- dsh 投影 7 层、spread×0.8；其他 10 层。
+- dsh 双层差分描边；通用卡片顶部高光；圆角、透明度、缩放统一。
+
+设置页：
+
+- 六段式布局，右侧 sticky 实时预览。
+- 高级区补了“弹出位置”和水平/垂直边距；色条宽度滑块；状态行 40 字、应用名 16 字上限与服务端一致。
+- 事件关闭仍写历史、maxVisible 淘汰最早、所有事件到点收起、历史 50/显示 30、抑制原因补 failed/spawn-failed/unsupported-platform 等文案，均已按真实行为修正。
+
+文档与打包：
+
+- README 重写为 BUILD 20。
+- package.json version 0.5.0，homepage/repository/bugs 指向 fork，files 加 lib/*.js，check 覆盖 9 个文件。
+- 本 HANDOFF 重写；2.x 的几何/配色/缩放保留并修正。
+
+### 8.5 client.js 截断事故（重要教训）
+
+2026-11-11 白天，client.js 曾被写坏：文件在“同时最多显示”那一行截断，尾部 272 行丢失。原因是之前用 read 工具的分页显示结果重建大文件；read 在 2000 字符处截断了 WHALE_PATH 的长字符串，还在字符串里嵌入了字面的 “.... (line truncated to 2000 chars)”。
+
+恢复方法：
+
+1. DSH 会把会话事件写在 C:\Users\daha\.dsh\sessions\--D-dsh~0020work--\<session-id>\session.v4.jsonl.zstd。
+2. 这个文件是多个 zstd 帧顺序拼接，Node 的 zlib.zstdDecompressSync 只解第一帧，会只得到几百字节的 session 头。
+3. 必须按魔数 28 B5 2F FD 切帧，逐帧解压，拼成完整 JSONL。
+4. 在事件 seq 3344（type tool/ptc-dispatch-start）的 data.arguments.content 里找到完整的 client.js：67003 B、1637 行。
+5. 与损坏文件逐行 hash 比对，只有两处差异：预设名（恢复版“DSH 原生”，损坏版已改“DSH 白卡”）和 WHALE_PATH（恢复版 3419 字符完整，损坏版 2034 字符且嵌入了截断标记）。
+6. 把预设名改回“DSH 白卡”后写回，备份损坏文件为 client.js.bak-truncated-20261111。
+
+教训：不要用 read 的分页显示结果重建大文件。需要恢复时，从会话日志里取 write 调用的完整参数，或者用备份；写回后必须跑 node --check 和渲染测试。
+
+### 8.6 发布与部署清单
+
+当前工作副本不是 git 仓库；发布方式是 fork 上游后覆盖上传。推荐流程：
+
+1. 在 fork daha1216/dsh-desktop-notify-win 的克隆目录里，保留上游的 .gitignore、AGENTS.md、docs/agents 等治理文件。
+2. 用工作副本覆盖源码与文档：index.js、client.js、notify.ps1、package.json、README.md、HANDOFF.md、cordis.patch.yml、icon.svg、LICENSE、locale/*.json、lib/*.js。
+3. 不要带 settings.json、notify.log、notify-click.log、client.js.bak-*、node_modules。
+4. git add -A，commit 说明写 BUILD 20：常驻宿主、设置页重写、五类事件、历史与抑制。
+5. git push origin main。
+6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.0、BUILD=20。
+7. 在 DSH 里更新插件，或执行 dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win。更新后刷新页面。
+8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.0，notify.ps1 是 80090 B 左右的 BUILD 20 版本；检查日志里 apply 的 version/build/layout/dataDir。
+9. 按 7.5 做真机验证。
+10. 回滚方案：把 fork 的 main 指回上一个 commit，重新安装；数据目录保留，配置不会丢。
+
+注意：README 和 package.json 里的仓库地址已经指向 daha1216；如果将来转交给别人，要同步改 homepage/repository/bugs 和 README 的安装地址。
+
+---
+
+## 9. 已知偏差、限制与待决策
+
+### 9.1 dsh 底部倒计时在真实通知里不显示
+
+- 现象：真实 dsh 卡片底部永远是事件状态文案（如“本轮完成 · 切回继续”），看不到“20 秒后收起 · 悬停可保留”，也看不到“已暂停 · 移开继续”。
+- 原因：service.compose 在 dsh 下返回 status = settings.status || meta.status，永远非空；ReadStyle 的 statusOn 为 true，DrawDshFooterLabel 走第一态。
+- 影响：BUILD 18 设计的方案 B 在真实通知中失效；README 已如实说明。
+- 可选修法：
+  A. 保持现状，把 status 当作 dsh 的固定状态文案，倒计时只在预览/快照出现。
+  B. compose 在 settings.status 为空且事件有默认状态时不填 status，让倒计时出现；代价是 dsh 卡片底部不再显示事件状态。
+  C. 把状态行和倒计时拆成两个区域：footer 左侧状态、右侧倒计时；需要改 DrawDshFooterLabel 和布局高度。
+- 建议：先和用户确认想要哪种，再动 service.compose 或渲染层；不要默默改，因为这是产品语义。
+
+### 9.2 预览与真实渲染的差异
+
+- ToastPreview 是前端 DOM/CSS 模拟，不是 WinForms 渲染。字号、行高、抗锯齿、阴影、圆角会有细微差异。
+- 预览在 status 为空时会显示倒计时演示文案；真实 dsh 通知通常 status 非空，所以两者 footer 可能不同。
+- 预览在 scale > 1 时只按 100% 画，防止容器裁切；真实通知按实际 DPI×scale。
+- 预览的“测试通知”按钮会走真实宿主（POST /config action=test），它和保存后的真实通知使用同一套渲染，但使用表单当前值；保存后才影响后续真实事件。
+
+### 9.3 dsh 版式忽略的字段
+
+- padX、padY：固定几何，不生效。
+- icon：固定画鲸鱼，不生效。
+- progress、accentWidth：强制关闭。
+- status 的颜色/字号不是独立配置，由 bodySize 派生。
+- 链接文案“点击切回 ›”是硬编码，不能通过设置改。
+- 关闭热区固定在右上角，不能改位置。
+
+### 9.4 颜色与语义色
+
+- dsh 预设的 accent #b96060 在 semanticColor=true 时只影响非事件色场景（例如测试？不，test 也有语义色 #7c8ff0），实际上几乎总被事件色覆盖。参考图的红点只有在关闭 semanticColor 后才会出现。
+- card 的状态点、bar 的圆点、dsh 的 footer 点都用 accent；如果用户想要固定品牌色，应关闭 semanticColor。
+- README 里“红点”的说法已不准确，应该写成“彩色状态点”。本轮文档已按代码修正，README 可在下次更新时同步。
+
+### 9.5 同屏数量与替换
+
+- maxVisible 是直接关闭最早一张，没有等待队列；被替换的卡片不会重新出现。
+- 被替换只发生在宿主层，service 已经把历史写成 shown=true，之后不会回写 suppressed='replaced'。所以历史里看不到“被新通知替换”。SUPPRESS_TEXT 里的 replaced 目前是死代码，可以删，也可以等实现队列时再用。
+
+### 9.6 全屏 / 勿扰判断
+
+- 依赖 SHQueryUserNotificationState 的返回值：2/3/4/7 当作 fullscreen，6 当作 quiet。Windows 的不同版本对“专注助手”和“全屏”的映射不完全一致。
+- 无边框全屏游戏/视频可能不返回全屏状态，插件挡不住；这是系统限制。
+- 高对比模式会覆盖用户颜色，强制不透明、无阴影、无高光、无动画、无进度条。
+
+### 9.7 配置迁移
+
+- 迁移是单向的：插件目录旧 settings.json → 数据目录，之后不再同步。
+- 如果用户删掉数据目录，下次加载会再次从插件目录迁移（如果旧文件还在）；但 npm 包不含 settings.json，新装用户没有旧文件可迁。
+- 导入只接受 DEFAULTS 已知键，未知字段丢弃；导入后需要点保存才落盘。
+- 导出格式是 {schemaVersion:2, settings}，不含历史。
+
+### 9.8 多显示器与虚拟桌面
+
+- monitor=cursor 用 Screen.FromPoint(Cursor.Position) 决定目标屏；primary 用 Screen.PrimaryScreen。
+- 虚拟桌面切换用未公开 COM（ImmersiveShell / VirtualDesktopManager），Windows 大版本更新后可能失效；失败时 FocusDsh 仍会尝试聚焦当前桌面的窗口。
+- 多显示器只按代码和单屏日志验证过，真·双屏还需要实机测试。测试时重点看：目标屏工作区、DPI 缩放、corner 定位、shadowPad 是否越界。
+
+### 9.9 其他小偏差
+
+- notify.ps1 的 bodyLines 日志在 dsh 下可能为 0，这是旧版遗留的日志字段问题，不影响渲染。
+- bar 版式的 ComputeLayout 用 iconSpace = iconD + 8×scale 计算正文宽度，而 BuildStatic 画标题时用 iconD + 9×scale 起笔，两者差 1×scale。影响很小（标题可用宽度比实际少 1×scale），但属于代码内不一致，改的时候把两处统一即可。
+- dsh 关闭 × 的视觉位置和热区是按参考图估的，若参考图更新需要重新量。
+- client.js 的 fallback 预设与 lib/schema.js 的 PRESETS 是两份数据；/meta 正常时用后者，/meta 失败时才用前者。改预设时要同时改两处。
+- package.json 的 files 不含 HANDOFF.md；GitHub README 链接的 HANDOFF 在仓库里，但 npm 包里没有。
+- 工作副本的 settings.json 是 0 字节的运行时残留，不要提交。
+
+---
+
+## 10. 下一步
+
+按优先级：
+
+1. 真机 UI 验证（7.5）：这是 BUILD 20 唯一还没有完整走完的环节。静态渲染、路由、模块测试都过了，但设置页在真实 DSH 宿主里的加载、保存、历史、抑制还需要点一遍。
+2. 决定 dsh footer 的产品语义（9.1）。这是唯一一个“看起来像 bug、实际是设计选择”的点，建议先问用户要状态文案还是要倒计时，再改。
+3. 如果用户要“被替换”也进历史，有两个方案：在宿主 dismissed 回调里通知 service 回写；或者记录 shown 后允许后续 update。当前 renderer-host 只把 dismissed 当事件日志，没有回传 service。
+4. 多显示器实机测试（9.8）。
+5. 如果要把测试长期留在仓库，可以把 _bn20 的四个脚本整理成 tests/ 并加 npm script；注意它们依赖假 React、假 ModuleLoader，和真实 client 运行时不完全一样。
+6. README 的“红点”措辞同步成“彩色状态点”；如果改了 9.1，FAQ 也要改。
+
+---
+
+## 11. 路径速查
+
+    D:\dsh work\dsh-desktop-notify-win\index.js              host 入口
+    D:\dsh work\dsh-desktop-notify-win\client.js             设置页
+    D:\dsh work\dsh-desktop-notify-win\notify.ps1            渲染器 / 宿主
+    D:\dsh work\dsh-desktop-notify-win\lib\schema.js         默认值 / 限制 / 预设
+    D:\dsh work\dsh-desktop-notify-win\lib\service.js        通知编排
+    D:\dsh work\dsh-desktop-notify-win\lib\renderer-host.js  宿主管理
+    D:\dsh work\dsh-desktop-notify-win\lib\config.js         设置存储 / 迁移
+    D:\dsh work\dsh-desktop-notify-win\lib\history.js        历史
+    D:\dsh work\dsh-desktop-notify-win\lib\log.js            日志
+    D:\dsh work\dsh-desktop-notify-win\lib\paths.js          路径
+    D:\dsh work\dsh-desktop-notify-win\README.md              用户文档
+    D:\dsh work\dsh-desktop-notify-win\HANDOFF.md             本文
+    D:\dsh work\dsh-desktop-notify-win\package.json           元数据 / files / check
+    D:\dsh work\_bn20\                                    临时测试脚本（发布前清理）
+    D:\dsh work\dsh-error-card.html                         dsh 版式参考
+    C:\Users\daha\.dsh\desktop-notify\settings.json       实际配置
+    C:\Users\daha\.dsh\desktop-notify\history.json        实际历史
+    C:\Users\daha\.dsh\desktop-notify\notify.log          插件日志
+    C:\Users\daha\.dsh\desktop-notify\notify-click.log    渲染 / 点击日志
+
+---
+
+## 12. 新增一个配置字段的清单
+
+按这个顺序改，漏一步就会出现“设置页能改、真实通知不生效”或相反的问题。
+
+1. lib/schema.js
+   - DEFAULTS 加默认值。
+   - 如果是数值，LIMITS 加 [min,max,step]，并在 sanitize 的取整区加处理。
+   - 如果是枚举/字符串/颜色/布尔，在 sanitize 里加校验和回落。
+   - 如果是事件开关，EVENTS 加项，同时检查 index 的事件接线、service 的 EVENT_TEXT。
+2. lib/service.js
+   - notify 的 payload 加字段（如果渲染层需要）。
+   - 如果是行为开关，加抑制/合并/事件判断。
+3. lib/renderer-host.js
+   - 持久宿主路径：show 的 payload 会原样 JSON 序列化，DshHost 的 ProcessLine 按 DshCardSpec 解析，所以还要改 notify.ps1 的 DshCardSpec 和 ApplyStyleEnv。
+   - 一次性回退路径：showOneShot 的 env 映射加 DSH_NOTIFY_*；否则回退时字段丢失。
+4. notify.ps1
+   - DshCardSpec 加属性（默认值）。
+   - ApplyStyleEnv 加环境变量。
+   - ReadStyle 读取并 clamp；如果是几何/字号，乘 scale。
+   - ComputeLayout / BuildStatic / Draw* 使用新值。
+   - 如果是 DSH_NOTIFY_* 环境变量，确认 -Snapshot 和普通弹窗路径也能读到。
+5. client.js
+   - SettingsPage 的 state patch、控件、ignored 判断、摘要。
+   - ToastPreview 使用新值（否则预览不跟着变）。
+   - fallback PRESETS 如果涉及预设，和 lib/schema.js 同步。
+6. lib/schema.js 的 PRESETS（如果这是预设字段）。
+7. 版本与构建号：lib/schema.js 的 BUILD 加 1，package.json version 同步。
+8. 测试：npm run check、PowerShell Parser、四个临时脚本、-Snapshot 出一张图。
+9. 文档：README 的设置页说明、HANDOFF 第 4 节字段表、第 5 节运行时、第 9 节偏差。
+
+一个字段从 UI 到像素的完整链路：
+
+    client 表单 → POST /config save/test → index sanitize → SettingsStore.save / service.preview
+    → service payload → renderer-host show
+    → 持久宿主：JSON 行 → DshCardSpec → ApplyStyleEnv → DshToast.ReadStyle
+    → 一次性回退：DSH_NOTIFY_* 环境变量 → DshToast.ReadStyle
+    → ComputeLayout → BuildStatic → Render → UpdateLayeredWindow
+
+---
+
+## 13. 结语
+
+BUILD 20 的重点不是再加一套外观，而是把“通知该不该弹、弹什么、弹完记什么”从单一文件里拆出来，让渲染器只负责画。现在 host 侧的决策（schema/service/config/history）和渲染侧的决策（notify.ps1）边界清楚，设置页只是这两层的视图。
+
+接手时最值得先确认的三件事：desktop profile 里跑的到底是哪个版本、数据目录有没有按预期迁移、dsh footer 想要状态文案还是倒计时。前两件能靠日志和文件核对，第三件需要用户拍板。

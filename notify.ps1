@@ -1,4 +1,4 @@
-param([switch]$Quiet, [switch]$Diagnose, [string]$Snapshot = '')
+param([switch]$Quiet, [switch]$Diagnose, [string]$Snapshot = '', [switch]$Serve)
 
 $ErrorActionPreference = 'Stop'
 
@@ -8,8 +8,9 @@ $timeoutMs = 20000
 if ($env:DSH_NOTIFY_MS) { [int]::TryParse($env:DSH_NOTIFY_MS, [ref]$timeoutMs) | Out-Null }
 $logPath = if ($env:DSH_NOTIFY_LOG) { $env:DSH_NOTIFY_LOG } else { Join-Path $env:TEMP 'dsh-notify-click.log' }
 
-Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions -TypeDefinition @'
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -19,6 +20,7 @@ using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 public class DshActions
@@ -302,11 +304,74 @@ public class DshActions
         Log("setForeground=" + ok + " finalForeground=" + GetForegroundWindow());
         return switched ? "switched" : "focus-only";
     }
+
+    [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+
+    public static int NotificationState()
+    {
+        try { int state; return SHQueryUserNotificationState(out state) == 0 ? state : 5; }
+        catch { return 5; }
+    }
+
+    public static bool IsDshForeground()
+    {
+        try
+        {
+            IntPtr h = GetForegroundWindow();
+            if (h == IntPtr.Zero) return false;
+            int pid;
+            GetWindowThreadProcessId(h, out pid);
+            string name = ProcName(pid).ToLowerInvariant();
+            return name.Contains("deepseek") || name.Contains("harness") || name.Contains("dsh");
+        }
+        catch { return false; }
+    }
 }
 
 public static class DshDpi
 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DpiPoint { public int X; public int Y; }
+
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(DpiPoint pt, uint flags);
+    [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor, int dpiType, out uint dpiX, out uint dpiY);
+    [DllImport("gdi32.dll")] static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")] static extern int GetDeviceCaps(IntPtr hdc, int index);
+
+    // Per-Monitor V2 keeps the card crisp when the cursor sits on a mixed-DPI
+    // secondary monitor; the older system-aware mode gets bitmap-stretched by DWM.
+    public static void EnablePerMonitorV2()
+    {
+        try { if (SetProcessDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero) return; } catch { }
+        try { if (SetProcessDpiAwareness(2) == 0) return; } catch { }
+        try { SetProcessDPIAware(); } catch { }
+    }
+
+    public static double ScaleFor(Screen screen)
+    {
+        try
+        {
+            Rectangle b = screen.Bounds;
+            IntPtr monitor = MonitorFromPoint(new DpiPoint { X = b.Left + b.Width / 2, Y = b.Top + b.Height / 2 }, 2);
+            uint dx, dy;
+            if (monitor != IntPtr.Zero && GetDpiForMonitor(monitor, 0, out dx, out dy) == 0 && dx >= 72 && dx <= 480)
+                return dx / 96.0;
+        }
+        catch { }
+        try
+        {
+            IntPtr dc = GetDC(IntPtr.Zero);
+            int dpi = GetDeviceCaps(dc, 88);
+            ReleaseDC(IntPtr.Zero, dc);
+            if (dpi >= 72 && dpi <= 480) return dpi / 96.0;
+        }
+        catch { }
+        return 1.0;
+    }
 }
 
 // Per-pixel-alpha card. WinForms lays out child controls with hard edges and no
@@ -387,6 +452,15 @@ public class DshToast : Form
     Bitmap staticBmp;
     Rectangle card;
     int contentLeft, contentWidth;
+
+    Screen targetScreen;
+    Point basePoint;
+    bool soundOn, highContrast;
+    public Action ShownCallback;
+    public string CloseReason = "";
+    public int CardHeight { get { return cardH; } }
+    public int WindowHeight { get { return bitmapH; } }
+    public bool StackUpward { get { return cornerKey == "br" || cornerKey == "bl"; } }
 
     System.Windows.Forms.Timer uiTimer, keepTimer;
     Stopwatch clock;
@@ -568,22 +642,34 @@ public class DshToast : Form
                 if (dshMode)
                 {
                     Point hit = PointToClient(Cursor.Position);
-                    if (dshCloseRect.Contains(hit)) { DshActions.Log("close-click"); Close(); return; }
+                    if (dshCloseRect.Contains(hit)) { DshActions.Log("close-click"); CloseReason = "close"; Close(); return; }
                 }
                 DshActions.Log("click handler");
-                DshActions.FocusDsh(Handle);
+                CloseReason = "click";
+                if (Env("DSH_NOTIFY_CLICK_ACTION", "focus") != "none") DshActions.FocusDsh(Handle);
             }
             catch (Exception ex) { DshActions.Log("click-error " + ex.Message); }
             try { Close(); } catch { }
         };
         Click += onClick;
+        MouseUp += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                CloseReason = "dismiss";
+                try { Close(); } catch { }
+            }
+        };
         DshActions.Log("layout card=" + cardW + "x" + cardH + " bitmap=" + bitmapW + "x" + bitmapH + " scale=" + scale + " bodyLines=" + (bodyLineH > 0 ? Math.Round(bodyH / bodyLineH, 2) : 0));
     }
 
     void ReadStyle()
     {
         double userScale = Math.Max(0.5, Math.Min(1.5, EnvDouble("DSH_NOTIFY_SCALE", 1.0)));
-        scale = ScreenScale() * userScale;
+        string monitorKey = Env("DSH_NOTIFY_MONITOR", "cursor").Trim().ToLowerInvariant();
+        targetScreen = monitorKey == "primary" ? Screen.PrimaryScreen : Screen.FromPoint(Cursor.Position);
+        if (targetScreen == null) targetScreen = Screen.PrimaryScreen;
+        scale = DshDpi.ScaleFor(targetScreen) * userScale;
         float s = (float)scale;
 
         int width = Math.Max(240, Math.Min(720, EnvInt("DSH_NOTIFY_WIDTH", 400)));
@@ -614,6 +700,9 @@ public class DshToast : Form
         progressOn = EnvFlag("DSH_NOTIFY_PROGRESS", true) && progressH > 0.5f;
         iconOn = EnvFlag("DSH_NOTIFY_ICON", true);
         fadeOn = EnvFlag("DSH_NOTIFY_FADE", true);
+        soundOn = EnvFlag("DSH_NOTIFY_SOUND", true);
+        highContrast = EnvFlag("DSH_NOTIFY_HIGH_CONTRAST", false) || SystemInformation.HighContrast;
+        if (EnvFlag("DSH_NOTIFY_REDUCE_MOTION", false)) fadeOn = false;
 
         titlePx = (float)(Math.Max(11, Math.Min(22, EnvDouble("DSH_NOTIFY_TITLE_SIZE", 15))) * s);
         bodyPx = (float)(Math.Max(10, Math.Min(20, EnvDouble("DSH_NOTIFY_BODY_SIZE", 13))) * s);
@@ -632,6 +721,21 @@ public class DshToast : Form
         cardW = (int)Math.Round(width * s);
         sub = Env("DSH_NOTIFY_SUB", "") == "" ? Blend(fg, bg, Luminance(bg) > 140 ? 0.42 : 0.30) : EnvColor("DSH_NOTIFY_SUB", Blend(fg, bg, 0.30));
         borderColor = Luminance(bg) > 140 ? Blend(bg, Color.Black, 0.10) : Blend(bg, Color.White, 0.12);
+
+        if (highContrast)
+        {
+            bg = SystemColors.Window;
+            fg = SystemColors.WindowText;
+            accent = SystemColors.Highlight;
+            sub = SystemColors.WindowText;
+            borderColor = SystemColors.WindowFrame;
+            opacity = 1.0;
+            shadowStrength = 0.0;
+            shadowPad = 0;
+            shine = 0.0;
+            fadeOn = false;
+            progressOn = false;
+        }
 
         string family = PickFamily(Env("DSH_NOTIFY_FONT", "Microsoft YaHei UI"));
         titleFont = new Font(family, titlePx, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -698,6 +802,18 @@ public class DshToast : Form
             dshAppText = envEyebrow.Length > 0 ? envEyebrow : "DeepSeek Harness";
             dshLinkText = "\u70b9\u51fb\u5207\u56de \u203a";
             dotColor = accent;
+
+            if (highContrast)
+            {
+                dshBorder = SystemColors.WindowFrame;
+                dshTileBg = SystemColors.Window;
+                dshIconColor = SystemColors.WindowText;
+                dshAppColor = SystemColors.WindowText;
+                dshBodyColor = SystemColors.WindowText;
+                dshMetaColor = SystemColors.WindowText;
+                dshLinkColor = SystemColors.Highlight;
+                dshCloseColor = SystemColors.WindowText;
+            }
         }
     }
 
@@ -807,7 +923,7 @@ public class DshToast : Form
 
     Point ComputePosition()
     {
-        var screen = Screen.FromPoint(Cursor.Position);
+        var screen = targetScreen ?? Screen.PrimaryScreen;
         var wa = screen.WorkingArea;
         int mx = (int)Math.Round(Math.Max(0, EnvInt("DSH_NOTIFY_MX", 16)) * scale);
         int my = (int)Math.Round(Math.Max(0, EnvInt("DSH_NOTIFY_MY", 16)) * scale);
@@ -820,7 +936,21 @@ public class DshToast : Form
             default: x = wa.Right - cardW - mx; y = wa.Bottom - cardH - my; break;
         }
         DshActions.Log("popup screen=" + screen.DeviceName + " work=" + wa + " cursor=" + Cursor.Position + " corner=" + cornerKey + " card=" + new Point(x, y) + " size=" + new Size(cardW, cardH));
-        return new Point(x - shadowPad, y - shadowPad);
+        basePoint = new Point(x - shadowPad, y - shadowPad);
+        return basePoint;
+    }
+
+    public void ApplyStackOffset(int offset)
+    {
+        if (basePoint.IsEmpty) return;
+        int y = basePoint.Y + (StackUpward ? -offset : offset);
+        Location = new Point(basePoint.X, y);
+    }
+
+    public void CloseWith(string reason)
+    {
+        CloseReason = reason;
+        try { Close(); } catch { }
     }
 
     void BuildStatic()
@@ -1348,7 +1478,7 @@ public class DshToast : Form
     void OnTick(object sender, EventArgs e)
     {
         long elapsed = ElapsedMs();
-        if (elapsed >= timeoutMs) { uiTimer.Stop(); Close(); return; }
+        if (elapsed >= timeoutMs) { uiTimer.Stop(); CloseReason = "timeout"; Close(); return; }
 
         double target;
         if (!fadeOn) target = 1.0;
@@ -1396,10 +1526,11 @@ public class DshToast : Form
         catch (Exception ex) { DshActions.Log("first-render-error " + ex.Message); }
         uiTimer.Start();
         keepTimer.Start();
-        if (Env("DSH_NOTIFY_SOUND", "1") != "0")
+        if (soundOn)
         {
             try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
         }
+        try { if (ShownCallback != null) ShownCallback(); } catch { }
     }
 
     public void SaveStatic(string path)
@@ -1417,9 +1548,315 @@ public class DshToast : Form
         staticBmp.Save(path, ImageFormat.Png);
     }
 }
+
+public class DshCardSpec
+{
+    public string id = "";
+    public string title = "DeepSeek Harness";
+    public string body = "";
+    public string status = "";
+    public string eyebrow = "";
+    public string layout = "bar";
+    public string accent = "#1f6beb";
+    public string background = "#202020";
+    public string text = "#ffffff";
+    public string corner = "br";
+    public string font = "Microsoft YaHei UI";
+    public string monitor = "cursor";
+    public string clickAction = "focus";
+    public int width = 400;
+    public int durationMs = 20000;
+    public int marginX = 16;
+    public int marginY = 16;
+    public int radius = 12;
+    public int padX = 20;
+    public int padY = 16;
+    public int accentWidth = 4;
+    public int maxVisible = 3;
+    public double opacity = 0.97;
+    public double shadow = 0.45;
+    public double shine = 0.05;
+    public double scale = 1.0;
+    public bool sound = false;
+    public bool icon = true;
+    public bool progress = true;
+    public bool fade = true;
+    public bool highContrast = false;
+    public bool reduceMotion = false;
+    public bool suppressForeground = true;
+    public bool suppressFullscreen = true;
+    public bool respectFocusAssist = true;
+}
+
+// A single long-lived PowerShell process owns every card: Add-Type and JIT are
+// paid once, and cards can stack, replace and reflow instead of racing each other.
+public class DshHost
+{
+    static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+    static readonly ConcurrentQueue<string> Inbox = new ConcurrentQueue<string>();
+
+    public static void Run()
+    {
+        try
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            Console.InputEncoding = new UTF8Encoding(false);
+        }
+        catch { }
+
+        var reader = new Thread(() =>
+        {
+            try
+            {
+                string line;
+                while ((line = Console.In.ReadLine()) != null) Inbox.Enqueue(line);
+            }
+            catch { }
+            Inbox.Enqueue("__EOF__");
+        });
+        reader.IsBackground = true;
+        reader.Start();
+
+        var form = new HostForm();
+        form.ShowInTaskbar = false;
+        form.FormBorderStyle = FormBorderStyle.None;
+        form.StartPosition = FormStartPosition.Manual;
+        form.Size = new Size(1, 1);
+        form.Location = new Point(-32000, -32000);
+        form.Opacity = 0;
+        Application.Run(form);
+    }
+
+    public static bool TryRead(out string line)
+    {
+        return Inbox.TryDequeue(out line);
+    }
+
+    public static T Parse<T>(string line) where T : class
+    {
+        return Json.Deserialize<T>(line);
+    }
+
+    public static void Send(object payload)
+    {
+        try
+        {
+            Console.Out.WriteLine(Json.Serialize(payload));
+            Console.Out.Flush();
+        }
+        catch { }
+    }
+
+    public static void Log(string message)
+    {
+        DshActions.Log(message);
+    }
+}
+
+public class HostForm : Form
+{
+    readonly List<DshToast> cards = new List<DshToast>();
+    System.Windows.Forms.Timer pump;
+    bool closing;
+
+    public HostForm()
+    {
+        pump = new System.Windows.Forms.Timer { Interval = 40 };
+        pump.Tick += (s, e) => Drain();
+        Load += (s, e) =>
+        {
+            pump.Start();
+            DshHost.Send(new Dictionary<string, object> { { "evt", "ready" }, { "pid", Process.GetCurrentProcess().Id } });
+            DshHost.Log("host-ready pid=" + Process.GetCurrentProcess().Id);
+        };
+    }
+
+    void Drain()
+    {
+        for (int i = 0; i < 20; i++)
+        {
+            string line;
+            if (!DshHost.TryRead(out line)) return;
+            if (line == "__EOF__") { Shutdown(); return; }
+            if (String.IsNullOrWhiteSpace(line)) continue;
+            try { ProcessLine(line); }
+            catch (Exception ex)
+            {
+                DshHost.Log("host-bad-line " + ex.Message);
+                DshHost.Send(new Dictionary<string, object> { { "evt", "error" }, { "id", "" }, { "message", ex.Message } });
+            }
+        }
+    }
+
+    void ProcessLine(string line)
+    {
+        var msg = DshHost.Parse<Dictionary<string, object>>(line);
+        if (msg == null) return;
+        object cmdValue;
+        string cmd = msg.TryGetValue("cmd", out cmdValue) && cmdValue != null ? cmdValue.ToString() : "show";
+        if (cmd == "quit") { Shutdown(); return; }
+        if (cmd == "ping") { DshHost.Send(new Dictionary<string, object> { { "evt", "pong" } }); return; }
+        if (cmd == "clear") { CloseAll("cleared"); return; }
+        if (cmd != "show") return;
+
+        var spec = DshHost.Parse<DshCardSpec>(line);
+        if (spec == null) return;
+        if (String.IsNullOrEmpty(spec.id)) spec.id = "c" + DateTime.Now.Ticks;
+
+        string reason = SuppressionReason(spec);
+        if (reason != null)
+        {
+            DshHost.Log("suppressed id=" + spec.id + " reason=" + reason);
+            DshHost.Send(new Dictionary<string, object> { { "evt", "skipped" }, { "id", spec.id }, { "reason", reason } });
+            return;
+        }
+
+        int maxVisible = Math.Max(1, Math.Min(5, spec.maxVisible));
+        while (cards.Count >= maxVisible)
+        {
+            var oldest = cards[cards.Count - 1];
+            DshHost.Log("evict id=" + spec.id + " reason=max-visible");
+            oldest.CloseReason = "replaced";
+            oldest.Close();
+        }
+
+        ApplyStyleEnv(spec);
+        DshToast card;
+        try
+        {
+            card = new DshToast(spec.title, spec.body, spec.durationMs);
+        }
+        catch (Exception ex)
+        {
+            DshHost.Log("host-create-error " + ex.Message);
+            DshHost.Send(new Dictionary<string, object> { { "evt", "error" }, { "id", spec.id }, { "message", ex.Message } });
+            return;
+        }
+
+        string cardId = spec.id;
+        card.ShownCallback = () => DshHost.Send(new Dictionary<string, object> { { "evt", "shown" }, { "id", cardId } });
+        card.FormClosed += (s, e) =>
+        {
+            cards.Remove(card);
+            Relayout();
+            DshHost.Send(new Dictionary<string, object>
+            {
+                { "evt", "dismissed" },
+                { "id", cardId },
+                { "by", String.IsNullOrEmpty(card.CloseReason) ? "closed" : card.CloseReason }
+            });
+        };
+
+        cards.Insert(0, card);
+        Relayout();
+        try
+        {
+            card.Show();
+            DshHost.Log("host-show id=" + spec.id + " count=" + cards.Count);
+        }
+        catch (Exception ex)
+        {
+            DshHost.Log("host-show-error " + ex.Message);
+            DshHost.Send(new Dictionary<string, object> { { "evt", "error" }, { "id", spec.id }, { "message", ex.Message } });
+        }
+    }
+
+    string SuppressionReason(DshCardSpec spec)
+    {
+        int state = DshActions.NotificationState();
+        if (spec.suppressFullscreen && (state == 2 || state == 3 || state == 4 || state == 7)) return "fullscreen";
+        if (spec.respectFocusAssist && state == 6) return "quiet";
+        if (spec.suppressForeground && DshActions.IsDshForeground()) return "foreground";
+        return null;
+    }
+
+    void Relayout()
+    {
+        int offset = 0;
+        foreach (var card in cards)
+        {
+            card.ApplyStackOffset(offset);
+            offset += Math.Max(1, card.WindowHeight) + 2;
+        }
+    }
+
+    void CloseAll(string reason)
+    {
+        var copy = new List<DshToast>(cards);
+        foreach (var card in copy)
+        {
+            card.CloseReason = reason;
+            try { card.Close(); } catch { }
+        }
+    }
+
+    void Shutdown()
+    {
+        if (closing) return;
+        closing = true;
+        CloseAll("shutdown");
+        DshHost.Send(new Dictionary<string, object> { { "evt", "bye" } });
+        pump.Stop();
+        Application.Exit();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        closing = true;
+        CloseAll("shutdown");
+        base.OnFormClosing(e);
+    }
+
+    static void SetEnv(string name, string value)
+    {
+        try { Environment.SetEnvironmentVariable(name, String.IsNullOrEmpty(value) ? null : value); } catch { }
+    }
+
+    static string Flag(bool value) { return value ? "1" : "0"; }
+
+    static void ApplyStyleEnv(DshCardSpec s)
+    {
+        SetEnv("DSH_NOTIFY_TITLE", s.title);
+        SetEnv("DSH_NOTIFY_BODY", s.body);
+        SetEnv("DSH_NOTIFY_STATUS", s.status);
+        SetEnv("DSH_NOTIFY_EYEBROW", s.eyebrow);
+        SetEnv("DSH_NOTIFY_LAYOUT", s.layout);
+        SetEnv("DSH_NOTIFY_ACCENT", s.accent);
+        SetEnv("DSH_NOTIFY_BG", s.background);
+        SetEnv("DSH_NOTIFY_TEXT", s.text);
+        SetEnv("DSH_NOTIFY_CORNER", s.corner);
+        SetEnv("DSH_NOTIFY_FONT", s.font);
+        SetEnv("DSH_NOTIFY_MONITOR", s.monitor);
+        SetEnv("DSH_NOTIFY_CLICK_ACTION", s.clickAction);
+        SetEnv("DSH_NOTIFY_WIDTH", s.width.ToString());
+        SetEnv("DSH_NOTIFY_MS", s.durationMs.ToString());
+        SetEnv("DSH_NOTIFY_MX", s.marginX.ToString());
+        SetEnv("DSH_NOTIFY_MY", s.marginY.ToString());
+        SetEnv("DSH_NOTIFY_RADIUS", s.radius.ToString());
+        SetEnv("DSH_NOTIFY_PADX", s.padX.ToString());
+        SetEnv("DSH_NOTIFY_PADY", s.padY.ToString());
+        SetEnv("DSH_NOTIFY_ACCENT_W", s.accentWidth.ToString());
+        SetEnv("DSH_NOTIFY_OPACITY", s.opacity.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SetEnv("DSH_NOTIFY_SHADOW", s.shadow.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SetEnv("DSH_NOTIFY_SHINE", s.shine.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SetEnv("DSH_NOTIFY_SCALE", s.scale.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SetEnv("DSH_NOTIFY_SOUND", Flag(s.sound));
+        SetEnv("DSH_NOTIFY_ICON", Flag(s.icon));
+        SetEnv("DSH_NOTIFY_PROGRESS", Flag(s.progress));
+        SetEnv("DSH_NOTIFY_FADE", Flag(s.fade));
+        SetEnv("DSH_NOTIFY_HIGH_CONTRAST", Flag(s.highContrast));
+        SetEnv("DSH_NOTIFY_REDUCE_MOTION", Flag(s.reduceMotion));
+    }
+}
 '@
 
 [DshActions]::LogPath = $logPath
+
+if ($Serve) {
+    try { [DshDpi]::EnablePerMonitorV2() | Out-Null } catch { }
+    [DshHost]::Run()
+    exit 0
+}
 
 if ($Diagnose) {
     foreach ($line in [DshActions]::DumpWindows()) { [DshActions]::Log($line) }
@@ -1427,7 +1864,7 @@ if ($Diagnose) {
 }
 
 if ($Snapshot) {
-    try { [DshDpi]::SetProcessDPIAware() | Out-Null } catch { }
+    try { [DshDpi]::EnablePerMonitorV2() | Out-Null } catch { }
     $form = New-Object DshToast($title, $body, $timeoutMs)
     $form.SaveStatic($Snapshot)
     $form.Dispose()
@@ -1435,7 +1872,7 @@ if ($Snapshot) {
 }
 
 if (-not $Quiet) {
-    try { [DshDpi]::SetProcessDPIAware() | Out-Null } catch { }
+    try { [DshDpi]::EnablePerMonitorV2() | Out-Null } catch { }
     $form = New-Object DshToast($title, $body, $timeoutMs)
     [System.Windows.Forms.Application]::Run($form)
 }

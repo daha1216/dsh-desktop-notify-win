@@ -1,284 +1,141 @@
-import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync, statSync, truncateSync, writeFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import {
+  BUILD,
+  DEFAULTS,
+  EVENTS,
+  FONTS,
+  LIMITS,
+  PRESETS,
+  SEMANTIC_ACCENTS,
+  VERSION,
+  sanitize,
+} from './lib/schema.js'
+import { resolvePaths } from './lib/paths.js'
+import { SettingsStore } from './lib/config.js'
+import { HistoryStore } from './lib/history.js'
+import { createLogger, serializeError } from './lib/log.js'
+import { getRendererHost, resetRendererHost } from './lib/renderer-host.js'
+import { NotificationService } from './lib/service.js'
 
 export const name = 'desktop-notify'
-export const inject = ['webServer']
+export const inject = ['webServer', 'connection']
 
-const SCRIPT = fileURLToPath(new URL('./notify.ps1', import.meta.url))
-const SETTINGS_FILE = fileURLToPath(new URL('./settings.json', import.meta.url))
-const LOG = fileURLToPath(new URL('./notify-debug.log', import.meta.url))
-const CLICK_LOG = fileURLToPath(new URL('./notify-click.log', import.meta.url))
-const ROUTE = '/dsh-desktop-notify/api/config'
-const BUILD = 19
+const API_PREFIX = '/dsh-desktop-notify/api'
+const MAX_BODY = 64 * 1024
+const WATCHER_KEY = Symbol.for('dsh-desktop-notify.approval-watcher')
 
-const DEFAULTS = {
-  accent: '#1f6beb',
-  background: '#202020',
-  text: '#ffffff',
-  width: 400,
-  durationMs: 20000,
-  sound: true,
-  corner: 'br',
-  marginX: 16,
-  marginY: 16,
-  opacity: 0.97,
-  radius: 12,
-  padX: 20,
-  padY: 16,
-  accentWidth: 4,
-  titleSize: 15,
-  bodySize: 13,
-  progress: true,
-  icon: true,
-  fade: true,
-  shadow: 0.45,
-  shine: 0.05,
-  font: 'Microsoft YaHei UI',
-  layout: 'bar',
-  status: '',
-  eyebrow: '',
-  scale: 1,
+function sendJson(res, status, payload) {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-dsh-notify-build': String(BUILD),
+  })
+  res.end(JSON.stringify(payload))
 }
 
-function log(event) {
-  try {
-    const line = JSON.stringify({ t: new Date().toISOString(), ...event }) + '\n'
-    try {
-      if (statSync(LOG).size > 256 * 1024) truncateSync(LOG)
-    } catch {
-      // first write
-    }
-    appendFileSync(LOG, line)
-  } catch {
-    // never break the host
+function rejectionOf(ctx, req) {
+  const connection = ctx.get('connection')
+  if (connection && typeof connection.requestRejection === 'function') {
+    return connection.requestRejection(req)
   }
+  return 401
 }
 
-function clamp(value, min, max, fallback) {
-  const number = Number(value)
-  if (!Number.isFinite(number)) return fallback
-  return Math.min(max, Math.max(min, number))
-}
-
-function color(value, fallback) {
-  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : fallback
-}
-
-function bool(value, fallback) {
-  return value === undefined || value === null ? fallback : Boolean(value)
-}
-
-function font(value, fallback) {
-  if (typeof value !== 'string') return fallback
-  const trimmed = value.trim()
-  if (!trimmed || trimmed.length > 64) return fallback
-  return /^[A-Za-z0-9 ,\-]+$/.test(trimmed) ? trimmed : fallback
-}
-
-function line(value, fallback, max) {
-  if (typeof value !== 'string') return fallback
-  const text = value.replace(/\s+/g, ' ').trim()
-  if (!text) return ''
-  return text.length > max ? text.slice(0, max - 1) + '…' : text
-}
-
-function sanitize(input, base) {
-  const source = input && typeof input === 'object' ? input : {}
-  const next = { ...base }
-  next.accent = color(source.accent, base.accent)
-  next.background = color(source.background, base.background)
-  next.text = color(source.text, base.text)
-  next.width = clamp(source.width, 240, 720, base.width)
-  next.durationMs = clamp(source.durationMs, 3000, 120000, base.durationMs)
-  next.marginX = clamp(source.marginX, 0, 400, base.marginX)
-  next.marginY = clamp(source.marginY, 0, 400, base.marginY)
-  next.opacity = clamp(source.opacity, 0.5, 1, base.opacity)
-  next.sound = source.sound === undefined ? base.sound : Boolean(source.sound)
-  next.corner = ['br', 'bl', 'tr', 'tl'].includes(source.corner) ? source.corner : base.corner
-  next.radius = clamp(source.radius, 0, 28, base.radius)
-  next.padX = clamp(source.padX, 12, 40, base.padX)
-  next.padY = clamp(source.padY, 10, 32, base.padY)
-  next.accentWidth = clamp(source.accentWidth, 0, 14, base.accentWidth)
-  next.titleSize = clamp(source.titleSize, 11, 22, base.titleSize)
-  next.bodySize = clamp(source.bodySize, 10, 20, base.bodySize)
-  next.shadow = clamp(source.shadow, 0, 1, base.shadow)
-  next.shine = clamp(source.shine, 0, 0.3, base.shine)
-  next.progress = bool(source.progress, base.progress)
-  next.icon = bool(source.icon, base.icon)
-  next.fade = bool(source.fade, base.fade)
-  next.font = font(source.font, base.font)
-  next.layout = source.layout === 'card' || source.layout === 'dsh' ? source.layout : 'bar'
-  next.status = line(source.status, base.status, 40)
-  next.eyebrow = line(source.eyebrow, base.eyebrow, 16)
-  next.scale = clamp(source.scale, 0.5, 1.5, base.scale)
-  return next
-}
-
-function loadSettings(config) {
-  let stored = {}
-  try {
-    if (existsSync(SETTINGS_FILE)) stored = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
-  } catch {
-    stored = {}
+async function readBody(req) {
+  let size = 0
+  const chunks = []
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_BODY) throw new Error('body-too-large')
+    chunks.push(chunk)
   }
-  return sanitize({ ...config, ...stored }, { ...DEFAULTS })
+  const raw = Buffer.concat(chunks).toString('utf8')
+  if (!raw) return {}
+  const parsed = JSON.parse(raw)
+  return parsed && typeof parsed === 'object' ? parsed : {}
 }
 
-function saveSettings(settings) {
-  try {
-    writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n')
-  } catch (error) {
-    log({ evt: 'save-error', message: String(error) })
-  }
-}
-
-function sessionTitleOf(context, agent) {
+function sessionTitleOf(ctx, agent) {
   try {
     const id = agent?.id
     if (!id) return ''
-    const sessions = context.get('sessions')
-    const titles = context.get('sessionTitle')
-    if (!sessions || !titles) {
-      log({ evt: 'title-miss', reason: !sessions ? 'no-sessions' : 'no-session-title', id })
-      return ''
-    }
+    const sessions = ctx.get('sessions')
+    const titles = ctx.get('sessionTitle')
+    if (!sessions || !titles) return ''
     const session = sessions.get(id)
-    if (!session) {
-      log({ evt: 'title-miss', reason: 'no-session', id })
-      return ''
-    }
+    if (!session) return ''
     const title = titles.get(session)?.title
-    if (typeof title !== 'string') {
-      log({ evt: 'title-miss', reason: 'no-snapshot', id })
-      return ''
-    }
+    if (typeof title !== 'string') return ''
     const text = title.replace(/\s+/g, ' ').trim()
-    if (!text) {
-      log({ evt: 'title-miss', reason: 'empty', id })
-      return ''
-    }
-    return text.length > 60 ? text.slice(0, 59) + '…' : text
+    return text.length > 120 ? text.slice(0, 119) + '…' : text
   } catch (error) {
-    log({ evt: 'session-title-error', message: String(error) })
     return ''
   }
 }
 
-const STATUS_TEXT = {
-  idle: '点击卡片切回会话',
-  error: '点击卡片查看错误',
-  question: '正在等待你的回答',
-  approval: '等待你授权，点击查看',
-  test: '当前设置的效果预览',
-  startup: '插件已加载',
+function withTitle(ctx, agent) {
+  return { id: agent?.id, sessionTitle: sessionTitleOf(ctx, agent) }
 }
 
-function showCard(settings, key, title, body, agentId, sessionTitle) {
-  const detail = sessionTitle ? '会话：' + sessionTitle + '\n' + body : body
-  const child = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', SCRIPT],
-    {
-      windowsHide: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        DSH_NOTIFY_TITLE: title,
-        DSH_NOTIFY_BODY: detail,
-        DSH_NOTIFY_MS: String(settings.durationMs),
-        DSH_NOTIFY_LOG: CLICK_LOG,
-        DSH_NOTIFY_ACCENT: settings.accent,
-        DSH_NOTIFY_BG: settings.background,
-        DSH_NOTIFY_TEXT: settings.text,
-        DSH_NOTIFY_WIDTH: String(settings.width),
-        DSH_NOTIFY_CORNER: settings.corner,
-        DSH_NOTIFY_MX: String(settings.marginX),
-        DSH_NOTIFY_MY: String(settings.marginY),
-        DSH_NOTIFY_OPACITY: String(settings.opacity),
-        DSH_NOTIFY_SOUND: settings.sound ? '1' : '0',
-        DSH_NOTIFY_RADIUS: String(settings.radius),
-        DSH_NOTIFY_PADX: String(settings.padX),
-        DSH_NOTIFY_PADY: String(settings.padY),
-        DSH_NOTIFY_ACCENT_W: String(settings.accentWidth),
-        DSH_NOTIFY_TITLE_SIZE: String(settings.titleSize),
-        DSH_NOTIFY_BODY_SIZE: String(settings.bodySize),
-        DSH_NOTIFY_PROGRESS: settings.progress ? '1' : '0',
-        DSH_NOTIFY_ICON: settings.icon ? '1' : '0',
-        DSH_NOTIFY_FADE: settings.fade ? '1' : '0',
-        DSH_NOTIFY_SHADOW: String(settings.shadow),
-        DSH_NOTIFY_SHINE: String(settings.shine),
-        DSH_NOTIFY_FONT: settings.font,
-        DSH_NOTIFY_LAYOUT: settings.layout,
-        // The dsh card owns a countdown/pause line of its own when status is empty.
-        DSH_NOTIFY_STATUS: settings.status || (settings.layout === 'dsh' ? '' : STATUS_TEXT[key] || STATUS_TEXT.idle),
-        DSH_NOTIFY_EYEBROW: settings.eyebrow || '',
-        DSH_NOTIFY_SCALE: String(settings.scale),
-      },
-    },
-  )
-  child.on('error', (error) => log({ evt: 'spawn-error', message: String(error) }))
-  child.on('exit', (code) => log({ evt: 'exit', key, code }))
-  child.unref()
-  log({ evt: 'shown', key, agentId, sessionTitle: sessionTitle || undefined })
+function isRootAgent(ctx, agent) {
+  try {
+    const roots = ctx.get('agents')?.roots?.()
+    if (Array.isArray(roots)) {
+      const id = agent?.id
+      return Boolean(id) && roots.some((root) => root?.id === id)
+    }
+  } catch {
+    // Fall through to permissive behaviour when the agent registry is absent.
+  }
+  return true
 }
 
-const WATCHER_KEY = Symbol.for('dsh-desktop-notify.approval-watcher')
+function errorMessage(payload) {
+  const value = payload?.error?.message ?? payload?.message ?? payload?.error
+  if (typeof value !== 'string') return ''
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text.length > 160 ? text.slice(0, 159) + '…' : text
+}
 
-// Approvals must stay notifiable while this plugin itself is uninstalled during
-// an update: the install step asks for escalation only after remove_bundle has
-// unloaded this fiber. Register the audit listener on the root context, so it
-// lives for the whole Host process; a later apply only refreshes its config.
-function ensureApprovalWatcher(ctx, config) {
+// A plugin reload removes this fiber and can happen while an approval prompt is
+// still pending. Keep the audit listener on the root context for the lifetime of
+// the Host process; apply() only refreshes the dispatch target and its settings.
+function ensureApprovalWatcher(root) {
   const existing = globalThis[WATCHER_KEY]
   if (existing) {
-    existing.config = config
-    return
+    existing.root = root
+    return existing
   }
-  const root = ctx.root ?? ctx
-  const watcher = { config, recentAt: 0 }
+  const watcher = { root, dispatch: null, recentAt: 0 }
   globalThis[WATCHER_KEY] = watcher
   root.on('session/event', (session, event) => {
     try {
-      if (!watcher.config?.onApproval || event?.type !== 'approval/asked') return
-      if (root.get('approval')?.overrideOf?.(session) === 'never') return
+      if (!watcher.dispatch) return
+      if (event?.type !== 'approval/asked') return
       const now = Date.now()
       if (now - watcher.recentAt < 1500) return
       watcher.recentAt = now
-      const tool = typeof event.data?.toolName === 'string' ? event.data.toolName : ''
-      const agentId = session?.id
-      const sessionTitle = sessionTitleOf(root, { id: agentId })
-      log({ evt: 'approval-asked', agentId, tool })
-      showCard(
-        loadSettings(watcher.config),
-        'approval',
-        'DSH · 需要你确认',
-        tool ? `「${tool}」在等授权。` : '有个操作在等授权。',
-        agentId,
-        sessionTitle,
-      )
-    } catch (error) {
-      log({ evt: 'approval-error', message: String(error) })
+      const toolName = event?.data?.toolName ?? event?.toolName
+      const tool = typeof toolName === 'string' ? toolName : ''
+      watcher.dispatch({
+        id: session?.id,
+        sessionTitle: sessionTitleOf(watcher.root, session),
+        tool: tool.slice(0, 80),
+      })
+    } catch {
+      // A notification failure must never affect the approval itself.
     }
   })
+  return watcher
 }
 
 export function apply(ctx, rawConfig = {}) {
-  const config = {
-    onTurnEnd: true,
-    onQuestion: true,
-    onApproval: true,
-    onError: true,
-    onStartup: false,
-    ...rawConfig,
-  }
-  let settings = loadSettings(config)
+  const paths = resolvePaths(process.env)
+  const log = createLogger(paths.log)
+  const store = new SettingsStore({ paths, log })
+  let settings = store.load(rawConfig)
+  const history = new HistoryStore(paths.history)
+  const host = getRendererHost({ log, clickLog: paths.clickLog })
 
-  let recentKey = ''
-  let recentAt = 0
-
-  // A settings preview has no agent of its own, so pick the newest live root
-  // session that already has a title; fall back to the first live root.
   function pickPreviewAgent() {
     try {
       const roots = ctx.get('agents')?.roots?.()
@@ -289,133 +146,172 @@ export function apply(ctx, rawConfig = {}) {
         const rootIds = new Set(roots.map((root) => root?.id).filter(Boolean))
         const live = sessions.list().filter((session) => rootIds.has(session.id))
         for (let index = live.length - 1; index >= 0; index -= 1) {
-          if (titles.get(live[index])?.title) return { id: live[index].id }
+          if (titles.get(live[index])?.title) {
+            return { id: live[index].id, sessionTitle: sessionTitleOf(ctx, live[index]) }
+          }
         }
       }
-      return roots[0]
+      return withTitle(ctx, roots[0])
     } catch (error) {
-      log({ evt: 'preview-agent-error', message: String(error) })
+      log({ evt: 'preview-agent-error', message: serializeError(error) })
       return undefined
     }
   }
 
-  function show(key, title, body, agent, activeSettings = settings) {
-    const now = Date.now()
-    if (key === recentKey && now - recentAt < 1500) return
-    recentKey = key
-    recentAt = now
-    try {
-      showCard(activeSettings, key, title, body, agent?.id, sessionTitleOf(ctx, agent))
-    } catch (error) {
-      log({ evt: 'show-error', message: String(error) })
-    }
-  }
+  const service = new NotificationService({
+    settings,
+    host,
+    history,
+    log,
+    previewAgent: pickPreviewAgent,
+  })
 
-  function isRootAgent(agent) {
-    try {
-      const roots = ctx.get('agents')?.roots?.()
-      if (Array.isArray(roots)) {
-        const id = agent?.id
-        return Boolean(id) && roots.some((root) => root?.id === id)
-      }
-    } catch {
-      // fall through
-    }
-    return true
+  function applySettings(input) {
+    const next = store.save(input)
+    settings = next
+    service.updateSettings(next)
+    return next
   }
 
   ctx.on('agent/status', (payload) => {
     try {
-      if (payload?.status !== 'idle' || !config.onTurnEnd || !isRootAgent(payload?.agent)) return
-      show('idle', 'DSH · 本轮完成', '会话已空闲，切回去看看。', payload.agent)
-    } catch {
-      // ignore
+      if (payload?.status !== 'idle') return
+      if (!isRootAgent(ctx, payload?.agent)) return
+      service.scheduleTurnEnd(withTitle(ctx, payload.agent))
+    } catch (error) {
+      log({ evt: 'status-error', message: serializeError(error) })
     }
   })
 
   ctx.on('agent/error', (payload) => {
     try {
-      if (!config.onError || !isRootAgent(payload?.agent)) return
-      show('error', 'DSH · 出错了', '有一个 agent 步骤失败。', payload.agent)
-    } catch {
-      // ignore
+      if (!isRootAgent(ctx, payload?.agent)) return
+      service.notify('error', { agent: withTitle(ctx, payload.agent), message: errorMessage(payload) || undefined })
+    } catch (error) {
+      log({ evt: 'error-event', message: serializeError(error) })
     }
   })
 
-  // The Web question answerer is a terminal waterfall listener. Registered in
-  // normal order this plugin would never run, so prepend and delegate with next().
+  // The Web answerer is a terminal waterfall listener, so prepend and delegate.
   ctx.on(
     'user-questions/request',
     async (request, next) => {
       try {
-        if (config.onQuestion) show('question', 'DSH · 需要你回答', '有个问题在等你。', request?.agent)
-      } catch {
-        // ignore
+        service.notify('question', { agent: withTitle(ctx, request?.agent) })
+      } catch (error) {
+        log({ evt: 'question-error', message: serializeError(error) })
       }
       return typeof next === 'function' ? next() : undefined
     },
     { prepend: true },
   )
 
-  // Approvals are observed by a process-lifetime watcher (see
-  // ensureApprovalWatcher): it must survive this plugin's own remove/install
-  // window, which is exactly when the second escalation prompt arrives.
-  ensureApprovalWatcher(ctx, config)
-
-  try {
-    ctx.effect(() => ctx.webServer.register({
-      kind: 'exact',
-      path: ROUTE,
-      handler: async (req, res) => {
-        const headers = {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-          'x-dsh-notify-build': String(BUILD),
-        }
-        try {
-          if (req.method === 'GET') {
-            res.writeHead(200, headers)
-            res.end(JSON.stringify(settings))
-            return
-          }
-          if (req.method === 'POST') {
-            let raw = ''
-            for await (const chunk of req) raw += chunk
-            let body = {}
-            try {
-              body = JSON.parse(raw || '{}')
-            } catch {
-              body = {}
-            }
-            if (body.action === 'test') {
-              const agent = pickPreviewAgent()
-              const preview = sanitize(body.settings, settings)
-              log({ evt: 'test-preview', settings: preview })
-              show('test', 'DSH · 测试通知', '这是当前设置的效果预览。', agent, preview)
-              res.writeHead(200, headers)
-              res.end(JSON.stringify({ ok: true }))
-              return
-            }
-            settings = sanitize(body.settings, settings)
-            saveSettings(settings)
-            log({ evt: 'settings-saved', settings })
-            res.writeHead(200, headers)
-            res.end(JSON.stringify(settings))
-            return
-          }
-          res.writeHead(405, headers)
-          res.end(JSON.stringify({ error: 'method' }))
-        } catch (error) {
-          log({ evt: 'route-error', message: String(error) })
-          res.writeHead(500, headers)
-          res.end(JSON.stringify({ error: 'internal' }))
-        }
-      },
-    }))
-  } catch (error) {
-    log({ evt: 'route-register-error', message: String(error) })
+  const watcher = ensureApprovalWatcher(ctx.root ?? ctx)
+  watcher.dispatch = (info) => {
+    service.notify('approval', {
+      agent: { id: info.id, sessionTitle: info.sessionTitle },
+      message: info.tool ? '工具「' + info.tool + '」在等授权。' : undefined,
+    })
   }
 
-  log({ evt: 'apply', version: 5, build: BUILD, route: ROUTE })
-  if (config.onStartup) show('startup', 'DSH · 通知已就绪', '插件已加载，点击可以切回会话。')
+  const routeEffect = ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: API_PREFIX,
+    handler: async (req, res) => {
+      const rejection = rejectionOf(ctx, req)
+      if (rejection !== undefined) {
+        sendJson(res, rejection, { error: 'unauthorized' })
+        return
+      }
+      const pathname = new URL(String(req.url), 'http://localhost').pathname
+      const route = pathname.slice(API_PREFIX.length).replace(/\/+$/, '') || '/'
+
+      try {
+        if (route === '/meta' && req.method === 'GET') {
+          sendJson(res, 200, {
+            version: VERSION,
+            build: BUILD,
+            defaults: DEFAULTS,
+            limits: LIMITS,
+            presets: PRESETS,
+            events: EVENTS,
+            fonts: FONTS,
+            semanticAccents: SEMANTIC_ACCENTS,
+          })
+          return
+        }
+        if ((route === '/' || route === '/config') && req.method === 'GET') {
+          sendJson(res, 200, {
+            version: VERSION,
+            build: BUILD,
+            settings,
+            history: history.list(),
+            loadedFrom: store.loadedFrom,
+            dataDir: paths.dataDir,
+          })
+          return
+        }
+        if (route === '/history' && req.method === 'GET') {
+          sendJson(res, 200, { history: history.list() })
+          return
+        }
+        if (route === '/config' && req.method === 'POST') {
+          const body = await readBody(req)
+          if (body.action === 'save') {
+            const next = applySettings(body.settings)
+            log({ evt: 'settings-saved', layout: next.layout, dataDir: paths.dataDir })
+            sendJson(res, 200, { ok: true, settings: next })
+            return
+          }
+          if (body.action === 'test') {
+            const preview = sanitize(body.settings, settings)
+            service.preview(preview)
+            sendJson(res, 200, { ok: true })
+            return
+          }
+          if (body.action === 'replay') {
+            const entry = service.replay(String(body.id || ''))
+            sendJson(res, entry ? 200 : 404, entry ? { ok: true } : { error: 'not-found' })
+            return
+          }
+          if (body.action === 'clear') {
+            history.clear()
+            sendJson(res, 200, { ok: true })
+            return
+          }
+          sendJson(res, 400, { error: 'unknown-action' })
+          return
+        }
+        sendJson(res, 404, { error: 'not-found' })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        log({ evt: 'route-error', route, message: serializeError(error) })
+        sendJson(res, message === 'body-too-large' ? 413 : 500, {
+          error: message === 'body-too-large' ? 'body-too-large' : 'internal',
+          message,
+        })
+      }
+    },
+  }))
+
+  const startupTimer = settings.onStartup
+    ? setTimeout(() => service.notify('startup'), 800)
+    : undefined
+  if (startupTimer && startupTimer.unref) startupTimer.unref()
+
+  ctx.effect(() => () => {
+    if (startupTimer) clearTimeout(startupTimer)
+    watcher.dispatch = null
+    service.dispose()
+    resetRendererHost()
+  })
+
+  log({
+    evt: 'apply',
+    version: VERSION,
+    build: BUILD,
+    layout: settings.layout,
+    loadedFrom: store.loadedFrom,
+    dataDir: paths.dataDir,
+  })
 }

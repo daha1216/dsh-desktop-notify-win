@@ -255,7 +255,7 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'dsh',
-        name: 'DSH 原生',
+        name: 'DSH 白卡',
         desc: '白底大卡，鲸鱼图标加四层文字',
         values: {
           accent: '#b96060',
@@ -920,419 +920,722 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function SettingsPage() {
-      const [settings, setSettings] = React.useState(null)
-      const [saved, setSaved] = React.useState(null)
+
+    const API = '/dsh-desktop-notify/api'
+
+    const EVENT_LABELS = {
+      turnEnd: '本轮完成',
+      question: '需要回答',
+      approval: '需要授权',
+      error: '执行出错',
+      startup: '插件启动',
+      test: '测试通知',
+      replay: '重播',
+    }
+
+    const SUPPRESS_LABELS = {
+      disabled: '事件已关闭',
+      quiet: '免打扰时段',
+      foreground: 'DSH 正在前台',
+      fullscreen: '全屏或系统勿扰',
+      coalesced: '重复通知已合并',
+      replaced: '被更新的通知替换',
+      error: '发送失败',
+      failed: '发送失败',
+      timeout: '等待超时',
+      'spawn-failed': '渲染进程启动失败',
+      'unsupported-platform': '当前系统不支持',
+    }
+
+    const LAYOUT_LABELS = { bar: '横条', card: '卡片', dsh: 'DSH 原生' }
+
+    function getJson(url) {
+      return fetch(url, { cache: 'no-store' }).then((response) =>
+        response.json().catch(() => null).then((data) => {
+          if (!response.ok) throw new Error(data && data.message ? data.message : 'HTTP ' + response.status)
+          return data
+        }),
+      )
+    }
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then((response) =>
+        response.json().catch(() => null).then((data) => {
+          if (!response.ok) throw new Error(data && data.message ? data.message : 'HTTP ' + response.status)
+          return data
+        }),
+      )
+    }
+
+    function relativeLuminance(hex) {
+      const rgb = parseHex(hex)
+      if (!rgb) return 0
+      const channels = rgb.map((value) => {
+        const channel = value / 255
+        return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4)
+      })
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    }
+
+    function contrastRatio(first, second) {
+      const a = relativeLuminance(first)
+      const b = relativeLuminance(second)
+      const high = Math.max(a, b)
+      const low = Math.min(a, b)
+      return (high + 0.05) / (low + 0.05)
+    }
+
+    function formatClock(iso) {
+      const date = new Date(iso)
+      if (Number.isNaN(date.getTime())) return ''
+      return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    }
+
+    function formatDate(iso) {
+      const date = new Date(iso)
+      if (Number.isNaN(date.getTime())) return ''
+      return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+    }
+
+    function formatSeconds(ms) {
+      return (Math.round(Number(ms || 0) / 1000) || 0) + ' 秒'
+    }
+
+    function Row(props) {
+      const rawId = React.useId()
+      const id = 'notify-row-' + String(rawId).replace(/:/g, '')
+      return h(
+        'div',
+        { style: { display: 'grid', gridTemplateColumns: 'minmax(150px, 220px) minmax(0, 1fr)', gap: '16px', alignItems: 'center', padding: '5px 0' } },
+        h(
+          'div',
+          { style: { minWidth: 0 } },
+          h('div', { id: id, style: labelStyle }, props.title),
+          props.desc ? h('div', { style: hintStyle }, props.desc) : null,
+          props.note ? h('div', { style: Object.assign({}, hintStyle, { color: 'var(--dsw-alias-label-secondary)', fontStyle: 'italic' }) }, props.note) : null,
+        ),
+        h(
+          'div',
+          {
+            role: 'group',
+            'aria-labelledby': id,
+            style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', opacity: props.disabled ? 0.55 : 1 },
+          },
+          props.children,
+        ),
+      )
+    }
+
+    function SubHead(props) {
+      return h(
+        'div',
+        { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '11.5px', fontWeight: 600, letterSpacing: '0.04em', marginTop: '4px' } },
+        props.children,
+      )
+    }
+
+    function Segmented(props) {
+      return h(
+        'div',
+        { role: 'group', 'aria-label': props.label, style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
+        props.options.map((option) =>
+          h(
+            'button',
+            {
+              key: option.value,
+              type: 'button',
+              'aria-pressed': props.value === option.value,
+              onClick: () => props.onChange(option.value),
+              style: {
+                padding: '6px 12px',
+                borderRadius: '8px',
+                border: props.value === option.value ? '1px solid var(--dsw-alias-brand-primary)' : '1px solid var(--dsw-alias-border-l1)',
+                background: props.value === option.value ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+                color: 'var(--dsw-alias-label-primary)',
+                fontSize: '12.5px',
+                fontWeight: props.value === option.value ? 600 : 400,
+                cursor: 'pointer',
+                font: 'inherit',
+              },
+            },
+            option.label,
+          ),
+        ),
+      )
+    }
+
+    function Chip(props) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          onClick: props.onClick,
+          'aria-pressed': Boolean(props.active),
+          style: {
+            padding: '4px 9px',
+            borderRadius: '999px',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            background: props.active ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+            color: 'var(--dsw-alias-label-secondary)',
+            fontSize: '11.5px',
+            cursor: 'pointer',
+            font: 'inherit',
+          },
+        },
+        props.children,
+      )
+    }
+
+    function SummaryLine(props) {
+      return h(
+        'div',
+        { style: { display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' } },
+        h('span', { style: { color: 'var(--dsw-alias-label-secondary)' } }, props.label),
+        h('span', { style: { color: 'var(--dsw-alias-label-primary)', textAlign: 'right' } }, props.value),
+      )
+    }
+
+    function SettingsPage(props) {
+      const boot = props && props.initialConfig ? props.initialConfig : null
+      const [config, setConfig] = React.useState(boot)
+      const [meta, setMeta] = React.useState(props && props.initialMeta ? props.initialMeta : null)
+      const [saved, setSaved] = React.useState(boot ? boot.settings : null)
       const [status, setStatus] = React.useState('')
       const [busy, setBusy] = React.useState(false)
+      const [advanced, setAdvanced] = React.useState(Boolean(props && props.initialAdvanced))
+      const [importOpen, setImportOpen] = React.useState(false)
+      const [importText, setImportText] = React.useState('')
+      const [confirmClear, setConfirmClear] = React.useState(false)
+      const [confirmReset, setConfirmReset] = React.useState(false)
 
       React.useEffect(() => {
         let alive = true
-        fetch(ENDPOINT, { cache: 'no-store' })
-          .then((response) => response.json())
+        getJson(API + '/config')
           .then((data) => {
-            if (alive) {
-              setSettings(data)
-              setSaved(data)
-            }
+            if (!alive) return
+            setConfig(data)
+            setSaved(data.settings)
+            getJson(API + '/meta').then((value) => {
+              if (alive) setMeta(value)
+            }).catch(() => {})
           })
-          .catch(() => {
-            if (alive) setStatus('读取设置失败，请刷新页面重试')
+          .catch((error) => {
+            if (alive) setStatus('读取设置失败：' + error.message)
           })
         return () => {
           alive = false
         }
       }, [])
 
+      const settings = config ? config.settings : null
+      const history = config && Array.isArray(config.history) ? config.history : []
+      const dirty = Boolean(settings && saved && JSON.stringify(settings) !== JSON.stringify(saved))
+
+      React.useEffect(() => {
+        if (!dirty) return undefined
+        const guard = (event) => {
+          event.preventDefault()
+          event.returnValue = ''
+        }
+        window.addEventListener('beforeunload', guard)
+        return () => window.removeEventListener('beforeunload', guard)
+      }, [dirty])
+
       if (!settings) {
         return h(
           'div',
-          { style: { padding: '24px', color: 'var(--dsw-alias-label-secondary)', fontSize: '13px' } },
-          status || '加载中…',
+          { style: { padding: '28px', color: 'var(--dsw-alias-label-secondary)', fontSize: '13px' } },
+          status || '正在读取设置…',
         )
       }
 
-      const patch = (next) => setSettings(Object.assign({}, settings, next))
-      const dirty = saved ? JSON.stringify(saved) !== JSON.stringify(settings) : false
+      const defaults = (meta && meta.defaults) || settings
+      const limits = (meta && meta.limits) || {}
+      const presets = (meta && Array.isArray(meta.presets) && meta.presets.length ? meta.presets : PRESETS)
+      const events = (meta && Array.isArray(meta.events) ? meta.events : [
+        { key: 'onTurnEnd', event: 'turnEnd', label: '本轮完成', desc: '主会话空闲时提醒' },
+        { key: 'onQuestion', event: 'question', label: '需要回答', desc: 'Agent 向你提问时提醒' },
+        { key: 'onApproval', event: 'approval', label: '需要授权', desc: '工具调用等你确认时提醒' },
+        { key: 'onError', event: 'error', label: '执行出错', desc: 'Agent 步骤失败时提醒' },
+        { key: 'onStartup', event: 'startup', label: '插件启动', desc: 'DSH 启动或插件重载后弹一条' },
+      ])
+      const fonts = (meta && Array.isArray(meta.fonts) && meta.fonts.length ? meta.fonts : FONTS)
+      const version = (meta && meta.version) || config.version || '0.5.0'
+      const build = (meta && meta.build) || config.build || 20
+      const layout = settings.layout
+      const isDsh = layout === 'dsh'
+      const isCard = layout === 'card'
+      const isBar = layout === 'bar'
+      const patch = (values) => setConfig((prev) => (prev ? Object.assign({}, prev, { settings: Object.assign({}, prev.settings, values) }) : prev))
 
-      const post = async (payload) => {
+      const presetActive = (preset) => {
+        const values = preset.values || {}
+        return Object.keys(values).every((key) => settings[key] === values[key])
+      }
+
+      const save = () => {
         setBusy(true)
-        try {
-          const response = await fetch(ENDPOINT, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(payload),
+        postJson(API + '/config', { action: 'save', settings: settings })
+          .then((data) => {
+            setConfig((prev) => (Object.assign({}, prev, { settings: data.settings })))
+            setSaved(data.settings)
+            setStatus('已保存并生效')
           })
-          if (!response.ok) throw new Error('HTTP ' + response.status)
-          const data = await response.json()
-          if (payload.action === 'test') {
-            setStatus('已按页面上的当前值弹出测试通知。')
-          } else {
-            setSettings(data)
-            setSaved(data)
-            setStatus('已保存，新的通知样式立即生效，不用重启 DSH。')
-          }
+          .catch((error) => setStatus('保存失败：' + error.message))
+          .finally(() => setBusy(false))
+      }
+
+      const loadHistory = () => {
+        getJson(API + '/history')
+          .then((data) => {
+            setConfig((prev) => (prev ? Object.assign({}, prev, { history: data.history || [] }) : prev))
+          })
+          .catch(() => {})
+      }
+
+      const test = () => {
+        setBusy(true)
+        postJson(API + '/config', { action: 'test', settings: settings })
+          .then(() => {
+            setStatus('已按当前值弹出测试通知')
+            window.setTimeout(loadHistory, 250)
+          })
+          .catch((error) => setStatus('测试失败：' + error.message))
+          .finally(() => setBusy(false))
+      }
+
+      const replay = (id) => {
+        postJson(API + '/config', { action: 'replay', id: id })
+          .then(() => {
+            setStatus('已重新显示')
+            window.setTimeout(loadHistory, 250)
+          })
+          .catch((error) => setStatus('重播失败：' + error.message))
+      }
+
+      const clearHistory = () => {
+        if (!confirmClear) {
+          setConfirmClear(true)
+          setStatus('再点一次“确认清空”才会删除全部历史')
+          return
+        }
+        setConfirmClear(false)
+        postJson(API + '/config', { action: 'clear' })
+          .then(() => {
+            setConfig((prev) => (prev ? Object.assign({}, prev, { history: [] }) : prev))
+            setStatus('历史已清空')
+          })
+          .catch((error) => setStatus('清空失败：' + error.message))
+      }
+
+      const applyPreset = (preset) => patch(preset.values || {})
+
+      const exportSettings = () => {
+        const payload = JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), settings: settings }, null, 2)
+        const blob = new Blob([payload], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = 'dsh-desktop-notify-settings.json'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+        setStatus('已导出当前设置')
+      }
+
+      const applyImport = () => {
+        try {
+          const parsed = JSON.parse(importText)
+          const source = parsed && parsed.settings ? parsed.settings : parsed && parsed.values ? parsed.values : parsed
+          if (!source || typeof source !== 'object') throw new Error('文件内容不是对象')
+          const allowed = Object.keys(defaults)
+          const picked = {}
+          allowed.forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(source, key)) picked[key] = source[key]
+          })
+          if (!Object.keys(picked).length) throw new Error('没有可识别的设置字段')
+          patch(picked)
+          setImportOpen(false)
+          setImportText('')
+          setStatus('已导入 ' + Object.keys(picked).length + ' 项，点“保存”后生效')
         } catch (error) {
-          setStatus('操作失败：' + String(error))
-        } finally {
-          setBusy(false)
+          setStatus('导入失败：' + error.message)
         }
       }
 
-      const save = () => post({ action: 'save', settings })
-      const test = () => post({ action: 'test', settings })
-
-      const isActivePreset = (preset) =>
-        Object.keys(preset.values).every((key) => Number(settings[key]) === Number(preset.values[key]) || settings[key] === preset.values[key])
-
-      const pickPreset = (preset) => {
-        patch(preset.values)
-        setStatus('已套用「' + preset.name + '」，点“保存”后生效。')
+      const resetDefaults = () => {
+        if (!confirmReset) {
+          setConfirmReset(true)
+          setStatus('再点一次“确认恢复”才会覆盖当前值（尚未保存）')
+          return
+        }
+        setConfirmReset(false)
+        patch(defaults)
+        setStatus('已恢复默认值，点“保存”后生效')
       }
 
-      const layoutKind = settings.layout || 'bar'
-      const showsCardExtras = layoutKind === 'card' || layoutKind === 'dsh'
-      const isDshLayout = layoutKind === 'dsh'
+      const ratio = contrastRatio(settings.text, settings.background)
+      const lightBackground = relativeLuminance(settings.background) > 0.5
+      const ignored = {
+        accentWidth: !isBar,
+        progress: !isBar,
+        icon: !isBar,
+        padX: isDsh,
+        padY: isDsh,
+      }
+
+      const layoutOptions = [
+        { value: 'bar', label: '横条' },
+        { value: 'card', label: '卡片' },
+        { value: 'dsh', label: 'DSH 原生' },
+      ]
+
+      const header = h(
+        'div',
+        { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px' } },
+        h(
+          'div',
+          { style: { minWidth: '260px', flex: '1 1 420px' } },
+          h('div', { style: { fontSize: '19px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, '桌面通知'),
+          h(
+            'div',
+            { style: Object.assign({}, hintStyle, { marginTop: '4px' }) },
+            'v' + version + ' · BUILD ' + build + ' · 配置保存在 ' + (config.dataDir || '本机数据目录'),
+          ),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          dirty ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, '未保存的改动') : null,
+          h('button', { type: 'button', onClick: test, disabled: busy, style: secondaryButton }, '测试通知'),
+          h('button', { type: 'button', onClick: save, disabled: busy || !dirty, style: Object.assign({}, primaryButton, { opacity: busy || !dirty ? 0.55 : 1, cursor: busy || !dirty ? 'default' : 'pointer' }) }, busy ? '处理中…' : '保存'),
+        ),
+      )
+
+      const statusLine = h(
+        'div',
+        { role: 'status', 'aria-live': 'polite', style: { minHeight: '18px', fontSize: '12.5px', color: 'var(--dsw-alias-label-secondary)' } },
+        status,
+      )
+
+      const eventsSection = h(
+        Section,
+        { title: '通知什么', hint: '只为真正需要你注意的事件弹卡片；关闭的事件不弹，但会在“最近通知”里留下记录。' },
+        h('div', { style: { display: 'grid', gap: '2px' } },
+          events.map((item) =>
+            h(Row, { key: item.key, title: item.label, desc: item.desc },
+              h(Switch, { checked: Boolean(settings[item.key]), onChange: (value) => patch({ [item.key]: value }) }),
+            ),
+          ),
+        ),
+      )
+
+      const behaviorSection = h(
+        Section,
+        { title: '什么时候不打扰', hint: '抑制只会让卡片不出现，历史里仍保留记录，方便稍后重播。' },
+        h(Row, { title: '免打扰时段', desc: '每天固定时段不弹卡片，支持跨午夜' },
+          h(Switch, { checked: Boolean(settings.quietEnabled), onChange: (value) => patch({ quietEnabled: value }) }),
+        ),
+        h(Row, { title: '时段范围', desc: '24 小时制，开始与结束相同视为全天关闭' },
+          h('input', {
+            type: 'time', value: settings.quietStart, disabled: !settings.quietEnabled,
+            'aria-label': '免打扰开始时间',
+            onChange: (event) => patch({ quietStart: event.target.value }),
+            style: Object.assign({}, inputStyle, { width: '120px' }),
+          }),
+          h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, '至'),
+          h('input', {
+            type: 'time', value: settings.quietEnd, disabled: !settings.quietEnabled,
+            'aria-label': '免打扰结束时间',
+            onChange: (event) => patch({ quietEnd: event.target.value }),
+            style: Object.assign({}, inputStyle, { width: '120px' }),
+          }),
+        ),
+        h(Row, { title: 'DSH 在前台时不弹', desc: '你正在看 DSH 时不再重复打扰' },
+          h(Switch, { checked: Boolean(settings.suppressForeground), onChange: (value) => patch({ suppressForeground: value }) }),
+        ),
+        h(Row, { title: '全屏 / 演示 / 勿扰时静默', desc: '跟随 Windows 的通知状态，避免覆盖游戏或会议' },
+          h(Switch, { checked: Boolean(settings.suppressFullscreen), onChange: (value) => patch({ suppressFullscreen: value }) }),
+        ),
+        h(Row, { title: '跟随 Windows 专注助手', desc: '专注会话期间只记录不弹窗' },
+          h(Switch, { checked: Boolean(settings.respectFocusAssist), onChange: (value) => patch({ respectFocusAssist: value }) }),
+        ),
+        h(Row, { title: '同时最多显示', desc: '超出时关闭最早的一张，为新的通知让位' },
+          h(Slider, {
+            title: '同时最多显示', min: 1, max: 5, step: 1, value: settings.maxVisible,
+            format: (value) => value + ' 张',
+            onChange: (value) => patch({ maxVisible: value }),
+          }),
+        ),
+        h(Row, { title: '显示在哪个屏幕' },
+          h(Segmented, {
+            label: '显示在哪个屏幕', value: settings.monitor,
+            options: [{ value: 'cursor', label: '鼠标所在屏' }, { value: 'primary', label: '主屏' }],
+            onChange: (value) => patch({ monitor: value }),
+          }),
+        ),
+        h(Row, { title: '点击卡片', desc: '默认切回 DSH；选“不处理”时只关闭卡片' },
+          h(Segmented, {
+            label: '点击卡片', value: settings.clickAction,
+            options: [{ value: 'focus', label: '切回 DSH' }, { value: 'none', label: '不处理' }],
+            onChange: (value) => patch({ clickAction: value }),
+          }),
+        ),
+      )
+
+      const styleSection = h(
+        Section,
+        { title: '样式', hint: '版式决定信息密度；预设是一组协调好的外观值，可再单独微调。' },
+        h(Row, { title: '版式', desc: '横条最轻，卡片信息更多，DSH 原生复刻主界面卡片' },
+          h(Segmented, { label: '版式', value: layout, options: layoutOptions, onChange: (value) => patch({ layout: value }) }),
+        ),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: '8px' } },
+          presets.map((preset) =>
+            h(PresetCard, { key: preset.id, preset: preset, active: presetActive(preset), onPick: applyPreset }),
+          ),
+        ),
+        h(Row, { title: '停留时长', desc: '到点自动收起；鼠标悬停时暂停，移开继续' },
+          h(Slider, {
+            title: '停留时长', min: 3, max: 120, step: 1, value: Math.round(settings.durationMs / 1000),
+            format: (value) => value + ' 秒',
+            onChange: (value) => patch({ durationMs: value * 1000 }),
+          }),
+          h('div', { style: { display: 'flex', gap: '5px' } },
+            [5, 8, 20, 60].map((value) =>
+              h(Chip, {
+                key: value, active: Math.round(settings.durationMs / 1000) === value,
+                onClick: () => patch({ durationMs: value * 1000 }),
+              }, value + 's'),
+            ),
+          ),
+        ),
+        h(Row, { title: '声音', desc: '使用系统通知音，受 Windows 音量与勿扰控制' },
+          h(Switch, { checked: Boolean(settings.sound), onChange: (value) => patch({ sound: value }) }),
+        ),
+        h(Row, { title: '整体缩放', desc: '高 DPI 屏可放大，预览会同步' },
+          h(Slider, {
+            title: '整体缩放', min: 0.5, max: 1.5, step: 0.05, value: settings.scale,
+            format: (value) => Math.round(value * 100) + '%',
+            onChange: (value) => patch({ scale: value }),
+          }),
+        ),
+        h('button', {
+          type: 'button',
+          onClick: () => setAdvanced((value) => !value),
+          'aria-expanded': advanced,
+          'aria-controls': 'notify-advanced',
+          style: Object.assign({}, secondaryButton, { justifySelf: 'start', padding: '6px 12px', fontSize: '12.5px' }),
+        }, advanced ? '收起外观细节' : '展开外观细节'),
+        advanced
+          ? h('div', { id: 'notify-advanced', style: { display: 'grid', gap: '4px' } },
+              h(SubHead, null, '颜色'),
+              h(Row, { title: '强调色' }, h(ColorField, { title: '强调色', value: settings.accent, onChange: (value) => patch({ accent: value }) })),
+              h(Row, { title: '背景色' }, h(ColorField, { title: '背景色', value: settings.background, onChange: (value) => patch({ background: value }) })),
+              h(Row, { title: '文字色' }, h(ColorField, { title: '文字色', value: settings.text, onChange: (value) => patch({ text: value }) })),
+              h('div', {
+                style: {
+                  display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', justifyContent: 'space-between',
+                  padding: '8px 10px', borderRadius: '8px',
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  background: 'var(--dsw-alias-bg-layer-2)',
+                  fontSize: '12px',
+                  color: ratio < 4.5 ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+                },
+              },
+                h('span', null, '正文对比度 ' + ratio.toFixed(1) + ':1 · ' + (ratio < 4.5 ? '低于 WCAG AA 4.5:1' : '达到 WCAG AA')),
+                ratio < 4.5
+                  ? h('button', {
+                      type: 'button',
+                      onClick: () => patch({ text: lightBackground ? '#111418' : '#ffffff' }),
+                      style: Object.assign({}, secondaryButton, { padding: '4px 10px', fontSize: '12px' }),
+                    }, lightBackground ? '改为深色文字' : '改为白色文字')
+                  : null,
+              ),
+              h(SubHead, null, '尺寸与位置'),
+              h(Row, { title: '卡片宽度', desc: '单位像素，受整体缩放影响' },
+                h(Slider, { title: '卡片宽度', min: 240, max: 720, step: 10, value: settings.width, format: (value) => value + ' px', onChange: (value) => patch({ width: value }) })),
+              h(Row, { title: '不透明度' },
+                h(Slider, { title: '不透明度', min: 0.5, max: 1, step: 0.01, value: settings.opacity, format: (value) => Math.round(value * 100) + '%', onChange: (value) => patch({ opacity: value }) })),
+              h(Row, { title: '弹出位置', desc: '相对所选屏幕的角落' },
+                h(Segmented, {
+                  label: '弹出位置', value: settings.corner,
+                  options: [
+                    { value: 'tl', label: '左上' }, { value: 'tr', label: '右上' },
+                    { value: 'bl', label: '左下' }, { value: 'br', label: '右下' },
+                  ],
+                  onChange: (value) => patch({ corner: value }),
+                })),
+              h(Row, { title: '水平边距', desc: '离屏幕左 / 右边缘的距离' },
+                h(Slider, { title: '水平边距', min: 0, max: 400, step: 1, value: settings.marginX, format: (value) => value + ' px', onChange: (value) => patch({ marginX: value }) })),
+              h(Row, { title: '垂直边距', desc: '离屏幕上 / 下边缘的距离' },
+                h(Slider, { title: '垂直边距', min: 0, max: 400, step: 1, value: settings.marginY, format: (value) => value + ' px', onChange: (value) => patch({ marginY: value }) })),
+              h(Row, { title: '圆角' },
+                h(Slider, { title: '圆角', min: 0, max: 28, step: 1, value: settings.radius, format: (value) => value + ' px', onChange: (value) => patch({ radius: value }) })),
+              h(Row, { title: '色条宽度', disabled: ignored.accentWidth, note: ignored.accentWidth ? '仅横条版式使用' : null },
+                h(Slider, { title: '色条宽度', min: 0, max: 14, step: 1, value: settings.accentWidth, format: (value) => value + ' px', onChange: (value) => patch({ accentWidth: value }) })),
+              h(Row, { title: '水平内边距', disabled: ignored.padX, note: ignored.padX ? 'DSH 原生版式按实测度量，忽略此项' : null },
+                h(Slider, { title: '水平内边距', min: 12, max: 40, step: 1, value: settings.padX, format: (value) => value + ' px', onChange: (value) => patch({ padX: value }) })),
+              h(Row, { title: '垂直内边距', disabled: ignored.padY, note: ignored.padY ? 'DSH 原生版式按实测度量，忽略此项' : null },
+                h(Slider, { title: '垂直内边距', min: 10, max: 32, step: 1, value: settings.padY, format: (value) => value + ' px', onChange: (value) => patch({ padY: value }) })),
+              h(SubHead, null, '文字'),
+              h(Row, { title: '标题字号', desc: 'DSH 原生会按比例放大' },
+                h(Slider, { title: '标题字号', min: 11, max: 22, step: 0.5, value: settings.titleSize, format: (value) => value + ' px', onChange: (value) => patch({ titleSize: value }) })),
+              h(Row, { title: '正文字号', desc: 'DSH 原生会按比例放大' },
+                h(Slider, { title: '正文字号', min: 10, max: 20, step: 0.5, value: settings.bodySize, format: (value) => value + ' px', onChange: (value) => patch({ bodySize: value }) })),
+              h(Row, { title: '字体' },
+                h('select', {
+                  value: settings.font,
+                  'aria-label': '字体',
+                  onChange: (event) => patch({ font: event.target.value }),
+                  style: Object.assign({}, inputStyle, { width: '220px' }),
+                }, fonts.map((font) => h('option', { key: font.value, value: font.value }, font.label))),
+              ),
+              h(Row, { title: '状态行文案', desc: '留空则显示事件默认文案；DSH 原生显示在底部' },
+                h('input', {
+                  type: 'text', value: settings.status, maxLength: 40,
+                  'aria-label': '状态行文案', placeholder: '例如：本轮完成 · 切回继续',
+                  onChange: (event) => patch({ status: event.target.value }),
+                  style: Object.assign({}, inputStyle, { width: '100%' }),
+                }),
+              ),
+              h(Row, { title: '应用名', desc: 'DSH 原生版式左上角的一行小字' },
+                h('input', {
+                  type: 'text', value: settings.eyebrow, maxLength: 16,
+                  'aria-label': '应用名', placeholder: 'DeepSeek Harness',
+                  onChange: (event) => patch({ eyebrow: event.target.value }),
+                  style: Object.assign({}, inputStyle, { width: '100%' }),
+                }),
+              ),
+              h(SubHead, null, '效果与无障碍'),
+              h(Row, { title: '投影强度' },
+                h(Slider, { title: '投影强度', min: 0, max: 1, step: 0.01, value: settings.shadow, format: (value) => Math.round(value * 100) + '%', onChange: (value) => patch({ shadow: value }) })),
+              h(Row, { title: '高光', desc: '横条顶部的一层柔光' },
+                h(Slider, { title: '高光', min: 0, max: 0.3, step: 0.01, value: settings.shine, format: (value) => Math.round(value * 100) + '%', onChange: (value) => patch({ shine: value }) })),
+              h(Row, { title: '底部进度条', disabled: ignored.progress, note: ignored.progress ? '仅横条版式使用' : null },
+                h(Switch, { checked: Boolean(settings.progress), onChange: (value) => patch({ progress: value }) })),
+              h(Row, { title: '图标', disabled: ignored.icon, note: ignored.icon ? '仅横条版式使用' : null },
+                h(Switch, { checked: Boolean(settings.icon), onChange: (value) => patch({ icon: value }) })),
+              h(Row, { title: '淡入淡出', desc: '跟随系统“减少动画”时自动关闭' },
+                h(Switch, { checked: Boolean(settings.fade), onChange: (value) => patch({ fade: value }) })),
+              h(Row, { title: '减少动画' },
+                h(Switch, { checked: Boolean(settings.reduceMotion), onChange: (value) => patch({ reduceMotion: value }) })),
+              h(Row, { title: '高对比模式', desc: '使用系统高对比配色，忽略自定义颜色' },
+                h(Switch, { checked: Boolean(settings.highContrast), onChange: (value) => patch({ highContrast: value }) })),
+              h(Row, { title: '按事件语义着色', desc: '不同事件使用不同强调色' },
+                h(Switch, { checked: Boolean(settings.semanticColor), onChange: (value) => patch({ semanticColor: value }) })),
+            )
+          : null,
+      )
+
+      const historySection = h(
+        Section,
+        { title: '最近通知', hint: '最多保留 50 条，这里显示最近 30 条；被抑制的记录也会保留原因，便于排查“为什么没弹”。' },
+        h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } },
+          h('button', { type: 'button', onClick: loadHistory, style: Object.assign({}, secondaryButton, { padding: '5px 10px', fontSize: '12px' }) }, '刷新'),
+          h('button', { type: 'button', onClick: clearHistory, style: Object.assign({}, secondaryButton, { padding: '5px 10px', fontSize: '12px' }) }, confirmClear ? '确认清空' : '清空历史'),
+        ),
+        history.length === 0
+          ? h('div', { style: hintStyle }, '还没有记录。点“测试通知”，或等一次真实事件。')
+          : h('div', { style: { display: 'grid', gap: '6px', maxHeight: '330px', overflow: 'auto', paddingRight: '4px' } },
+              history.slice(0, 30).map((entry) =>
+                h('div', {
+                  key: entry.id,
+                  style: {
+                    display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '10px',
+                    padding: '8px 10px', borderRadius: '8px',
+                    border: '1px solid var(--dsw-alias-border-l1)',
+                    background: 'var(--dsw-alias-bg-layer-2)',
+                  },
+                },
+                  h('div', { style: { minWidth: 0 } },
+                    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' } },
+                      h('span', { style: { fontSize: '12px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, EVENT_LABELS[entry.event] || entry.event),
+                      entry.suppressed
+                        ? h('span', {
+                            style: {
+                              fontSize: '10.5px', padding: '1px 6px', borderRadius: '999px',
+                              border: '1px solid var(--dsw-alias-border-l1)',
+                              color: 'var(--dsw-alias-label-secondary)',
+                            },
+                          }, '未显示 · ' + (SUPPRESS_LABELS[entry.suppressed] || entry.suppressed))
+                        : null,
+                      h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, formatDate(entry.at) + ' ' + formatClock(entry.at)),
+                    ),
+                    h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-primary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, entry.title || entry.body || '（无标题）'),
+                  ),
+                  h('button', {
+                    type: 'button',
+                    onClick: () => replay(entry.id),
+                    style: Object.assign({}, secondaryButton, { padding: '3px 9px', fontSize: '11.5px', flex: '0 0 auto' }),
+                  }, '重播'),
+                ),
+              ),
+            ),
+      )
+
+      const dataSection = h(
+        Section,
+        { title: '数据与维护', hint: '设置保存在你的用户目录，升级或重装插件不会覆盖。' },
+        h(SummaryLine, { label: '配置目录', value: config.dataDir || '—' }),
+        h(SummaryLine, { label: '配置来源', value: config.loadedFrom === 'migrated' ? '已从旧版迁移' : config.loadedFrom === 'package' ? '插件包内旧配置' : '用户配置' }),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+          h('button', { type: 'button', onClick: exportSettings, style: secondaryButton }, '导出设置'),
+          h('button', { type: 'button', onClick: () => setImportOpen((value) => !value), 'aria-expanded': importOpen, style: secondaryButton }, importOpen ? '取消导入' : '导入设置'),
+          h('button', { type: 'button', onClick: resetDefaults, style: secondaryButton }, confirmReset ? '确认恢复默认' : '恢复默认'),
+        ),
+        importOpen
+          ? h('div', { style: { display: 'grid', gap: '8px' } },
+              h('textarea', {
+                value: importText,
+                'aria-label': '粘贴设置 JSON',
+                placeholder: '粘贴导出的 JSON 内容',
+                onChange: (event) => setImportText(event.target.value),
+                rows: 5,
+                style: Object.assign({}, inputStyle, { fontFamily: 'monospace', resize: 'vertical' }),
+              }),
+              h('button', { type: 'button', onClick: applyImport, style: Object.assign({}, primaryButton, { justifySelf: 'start' }) }, '应用导入内容'),
+            )
+          : null,
+      )
+
+      const preview = h(
+        Section,
+        { title: '实时预览', hint: '按当前值渲染，未保存也会立即变化。' },
+        h('div', {
+          role: 'img',
+          'aria-label': '通知预览：' + (LAYOUT_LABELS[layout] || layout) + ' 版式，停留 ' + formatSeconds(settings.durationMs),
+        }, h(ToastPreview, { settings: settings })),
+        h('div', { style: { display: 'grid', gap: '6px' } },
+          h(SummaryLine, { label: '版式', value: LAYOUT_LABELS[layout] || layout }),
+          h(SummaryLine, { label: '停留', value: formatSeconds(settings.durationMs) }),
+          h(SummaryLine, { label: '最多同屏', value: settings.maxVisible + ' 张' }),
+          h(SummaryLine, { label: '免打扰', value: settings.quietEnabled ? settings.quietStart + '–' + settings.quietEnd : '关闭' }),
+          h(SummaryLine, { label: '点击', value: settings.clickAction === 'focus' ? '切回 DSH' : '只关闭' }),
+        ),
+        h('button', { type: 'button', onClick: test, disabled: busy, style: Object.assign({}, primaryButton, { opacity: busy ? 0.6 : 1 }) }, '用当前值测试'),
+      )
 
       return h(
         'div',
-        { style: page },
-        h(
-          'div',
-          { style: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' } },
-          h(
-            'div',
-            null,
-            h('div', { style: { color: 'var(--dsw-alias-label-primary)', fontSize: '17px', fontWeight: 600 } }, '桌面通知'),
-            h(
-              'div',
-              { style: Object.assign({}, hintStyle, { marginTop: '6px' }) },
-              '会话完成、需要你回答或确认时，在鼠标所在显示器的角落弹一张卡片。先选一套样式，再按需要微调。',
-            ),
+        { style: { maxWidth: '1100px', margin: '0 auto', padding: '8px 24px 56px', display: 'grid', gap: '14px' } },
+        header,
+        statusLine,
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '18px' } },
+          h('div', { style: { flex: '1 1 560px', minWidth: '0', display: 'grid', gap: '14px' } },
+            eventsSection,
+            behaviorSection,
+            styleSection,
+            historySection,
+            dataSection,
           ),
-          h(
-            'div',
-            { style: { display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 } },
-            h('button', { type: 'button', style: primaryButton, disabled: busy, onClick: save }, dirty ? '保存修改' : '保存'),
-            h('button', { type: 'button', style: secondaryButton, disabled: busy, onClick: test }, '测试通知'),
+          h('div', { style: { flex: '0 1 360px', minWidth: '290px', position: 'sticky', top: '16px', display: 'grid', gap: '14px' } },
+            preview,
           ),
-        ),
-        h(
-          'div',
-          { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', minHeight: '18px' } },
-          status ? h('span', { role: 'status', style: hintStyle }, status) : null,
-          dirty ? h('span', { style: { color: 'var(--dsw-alias-brand-primary)', fontSize: '12px', fontWeight: 600 } }, '● 有未保存的修改') : null,
-        ),
-        h(
-          Section,
-          { title: '快速样式', hint: '会同时改颜色、圆角和弹出位置；选中后还能继续微调。' },
-          h(
-            'div',
-            { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(148px, 1fr))', gap: '10px' } },
-            PRESETS.map((preset) =>
-              h(PresetCard, {
-                key: preset.id,
-                preset: preset,
-                active: isActivePreset(preset),
-                onPick: pickPreset,
-              }),
-            ),
-          ),
-        ),
-        h(
-          Section,
-          { title: '布局', hint: '条状是轻量的一行提示；卡片版式带图标和多层文字；DSH 原生是白色大卡。' },
-          h(Field, { title: '版式' },
-            h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-              [
-                { id: 'bar', name: '条状', desc: '一行标题加正文' },
-                { id: 'card', name: '卡片', desc: '图标 + 多行文字' },
-                { id: 'dsh', name: 'DSH 原生', desc: '白底大卡 + 应用名' },
-              ].map((item) =>
-                h('button', {
-                  key: item.id,
-                  type: 'button',
-                  'aria-pressed': (settings.layout || 'bar') === item.id,
-                  onClick: () => patch({ layout: item.id }),
-                  style: Object.assign(
-                    {},
-                    (settings.layout || 'bar') === item.id ? primaryButton : secondaryButton,
-                    { display: 'grid', gap: '2px', textAlign: 'left', padding: '8px 14px' },
-                  ),
-                },
-                  h('span', { style: { fontSize: '13px', fontWeight: 600 } }, item.name),
-                  h('span', { style: { fontSize: '11.5px', opacity: 0.72 } }, item.desc),
-                ),
-              ),
-            )),
-          showsCardExtras
-            ? h(Field, { title: '状态行文案', desc: isDshLayout ? '卡片底部红点后面那行小字；留空显示倒计时' : '卡片底部那行小字；留空会按通知类型自动选' },
-                h('input', {
-                  type: 'text',
-                  value: settings.status || '',
-                  placeholder: isDshLayout ? '秒后收起 · 悬停可保留' : '点击卡片切回会话',
-                  maxLength: 40,
-                  onChange: (event) => patch({ status: event.target.value }),
-                  style: Object.assign({}, inputStyle, { width: '260px' }),
-                }))
-            : null,
-          showsCardExtras
-            ? h(Field, {
-                title: isDshLayout ? '应用名' : '小标题文字',
-                desc: isDshLayout ? '图标右侧那行应用名，留空为 DeepSeek Harness' : '标题上方那行大写小字，默认取标题里的 DSH',
-              },
-                h('input', {
-                  type: 'text',
-                  value: settings.eyebrow || '',
-                  placeholder: isDshLayout ? 'DeepSeek Harness' : 'DSH',
-                  maxLength: 16,
-                  onChange: (event) => patch({ eyebrow: event.target.value }),
-                  style: Object.assign({}, inputStyle, { width: isDshLayout ? '200px' : '160px' }),
-                }))
-            : null,
-        ),
-        h(
-          Section,
-          { title: '实时预览', hint: '跟着下面的设置即时变化；预览按比例缩放（放大超过 100% 时只画到原始尺寸），真实卡片以弹窗为准。' },
-          h(ToastPreview, { settings: settings }),
-          h(
-            'div',
-            { style: hintStyle },
-            Math.round(settings.durationMs / 1000) +
-              ' 秒后自动消失 · ' +
-              (settings.sound ? '有提示音' : '静音') +
-              ' · 宽 ' +
-              Math.round(num(settings.width, 400)) +
-              ' 像素 · 圆角 ' +
-              Math.round(num(settings.radius, 12)) +
-              ' 像素 · 缩放 ' +
-              Math.round(num(settings.scale, 1) * 100) +
-              '%',
-          ),
-        ),
-        h(
-          Section,
-          { title: '颜色与大小' },
-          h(Field, { title: '左侧色条', desc: '卡片左边那条竖线，用来区分提醒类型' },
-            h(ColorField, {
-              title: '左侧色条',
-              value: settings.accent,
-              onChange: (value) => patch({ accent: value }),
-            })),
-          h(Field, { title: '卡片底色', desc: '浅色底会自动换成深色小字' },
-            h(ColorField, {
-              title: '卡片底色',
-              value: settings.background,
-              onChange: (value) => patch({ background: value }),
-            })),
-          h(Field, { title: '文字颜色', desc: '标题和正文的颜色' },
-            h(ColorField, {
-              title: '文字颜色',
-              value: settings.text,
-              onChange: (value) => patch({ text: value }),
-            })),
-          h(Field, { title: '卡片宽度', desc: '240 – 720 像素，越宽字越舒展' },
-            h(Slider, {
-              title: '卡片宽度',
-              min: 240,
-              max: 720,
-              step: 10,
-              value: num(settings.width, 400),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ width: value }),
-            })),
-          h(Field, { title: '整体缩放', desc: '50% – 150%：连同字号、图标、间距一起等比缩放，100% 为原始大小' },
-            h(Slider, {
-              title: '整体缩放',
-              min: 0.5,
-              max: 1.5,
-              step: 0.05,
-              value: num(settings.scale, 1),
-              format: (value) => Math.round(value * 100) + '%',
-              onChange: (value) => patch({ scale: value }),
-            })),
-          h(Field, { title: '透明度', desc: '0.5 半透明，1 完全不透明' },
-            h(Slider, {
-              title: '透明度',
-              min: 0.5,
-              max: 1,
-              step: 0.01,
-              value: num(settings.opacity, 1),
-              format: (value) => Number(value).toFixed(2),
-              onChange: (value) => patch({ opacity: value }),
-            })),
-        ),
-        h(
-          Section,
-          { title: '形状与排版', hint: '圆角、内边距和字号决定卡片的手感。' },
-          h(Field, { title: '圆角', desc: '0 是直角，18 以上接近胶囊' },
-            h(Slider, {
-              title: '圆角',
-              min: 0,
-              max: 28,
-              step: 1,
-              value: num(settings.radius, 12),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ radius: value }),
-            })),
-          h(Field, { title: '色条宽度', desc: '左侧强调条的粗细，0 表示不要' },
-            h(Slider, {
-              title: '色条宽度',
-              min: 0,
-              max: 14,
-              step: 1,
-              value: num(settings.accentWidth, 4),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ accentWidth: value }),
-            })),
-          h(Field, { title: '水平内边距', desc: '文字离卡片左右边缘的距离' },
-            h(Slider, {
-              title: '水平内边距',
-              min: 12,
-              max: 40,
-              step: 1,
-              value: num(settings.padX, 20),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ padX: value }),
-            })),
-          h(Field, { title: '垂直内边距', desc: '文字离卡片上下边缘的距离' },
-            h(Slider, {
-              title: '垂直内边距',
-              min: 10,
-              max: 32,
-              step: 1,
-              value: num(settings.padY, 16),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ padY: value }),
-            })),
-          h(Field, { title: '标题字号', desc: '11 – 22 像素' },
-            h(Slider, {
-              title: '标题字号',
-              min: 11,
-              max: 22,
-              step: 0.5,
-              value: num(settings.titleSize, 15),
-              format: (value) => Number(value).toFixed(1) + 'px',
-              onChange: (value) => patch({ titleSize: value }),
-            })),
-          h(Field, { title: '正文字号', desc: '10 – 20 像素' },
-            h(Slider, {
-              title: '正文字号',
-              min: 10,
-              max: 20,
-              step: 0.5,
-              value: num(settings.bodySize, 13),
-              format: (value) => Number(value).toFixed(1) + 'px',
-              onChange: (value) => patch({ bodySize: value }),
-            })),
-          h(Field, { title: '字体', desc: '系统里已安装的字体名' },
-            h('select', {
-              value: FONTS.some((item) => item.value === settings.font) ? settings.font : FONTS[0].value,
-              onChange: (event) => patch({ font: event.target.value }),
-              style: Object.assign({}, inputStyle, { width: '220px' }),
-            },
-              FONTS.map((item) => h('option', { key: item.value, value: item.value }, item.label)),
-            )),
-        ),
-        h(
-          Section,
-          { title: '质感', hint: '投影和高光让卡片浮起来，太强会显得脏。' },
-          h(Field, { title: '投影强度', desc: '0 没有阴影，1 阴影最重' },
-            h(Slider, {
-              title: '投影强度',
-              min: 0,
-              max: 1,
-              step: 0.01,
-              value: num(settings.shadow, 0.45),
-              format: (value) => Number(value).toFixed(2),
-              onChange: (value) => patch({ shadow: value }),
-            })),
-          h(Field, { title: '顶部高光', desc: '卡片上沿的一层极淡反光' },
-            h(Slider, {
-              title: '顶部高光',
-              min: 0,
-              max: 0.3,
-              step: 0.01,
-              value: num(settings.shine, 0.05),
-              format: (value) => Number(value).toFixed(2),
-              onChange: (value) => patch({ shine: value }),
-            })),
-          h(Field, { title: '底部进度条', desc: '随着停留时间缩短，像一个倒计时' },
-            h(Switch, {
-              title: '底部进度条',
-              checked: settings.progress !== false,
-              onChange: (value) => patch({ progress: value }),
-            })),
-          h(Field, { title: '标题圆点', desc: '标题左侧的小圆点，用强调色' },
-            h(Switch, {
-              title: '标题圆点',
-              checked: settings.icon !== false,
-              onChange: (value) => patch({ icon: value }),
-            })),
-          h(Field, { title: '淡入淡出', desc: '弹出和消失时带一点过渡' },
-            h(Switch, {
-              title: '淡入淡出',
-              checked: settings.fade !== false,
-              onChange: (value) => patch({ fade: value }),
-            })),
-        ),
-        h(
-          Section,
-          { title: '弹出与停留' },
-          h(Field, { title: '显示多久', desc: '3 – 120 秒；鼠标移上去会暂停计时' },
-            h(Slider, {
-              title: '显示多久',
-              min: 3,
-              max: 120,
-              step: 1,
-              value: Math.round(num(settings.durationMs, 20000) / 1000),
-              format: (value) => Math.round(value) + ' 秒',
-              onChange: (value) => patch({ durationMs: value * 1000 }),
-            })),
-          h(Field, { title: '弹出位置', desc: '相对鼠标所在显示器的角' },
-            h('select', {
-              value: settings.corner,
-              onChange: (event) => patch({ corner: event.target.value }),
-              style: Object.assign({}, inputStyle, { width: '180px' }),
-            },
-              h('option', { value: 'br' }, '右下角'),
-              h('option', { value: 'bl' }, '左下角'),
-              h('option', { value: 'tr' }, '右上角'),
-              h('option', { value: 'tl' }, '左上角'),
-            )),
-          h(Field, { title: '离屏幕边缘', desc: '边距越大，卡片离屏幕角越远' },
-            h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center' } },
-              h(Slider, {
-                title: '水平边距',
-                min: 0,
-                max: 400,
-                step: 1,
-                value: num(settings.marginX, 16),
-                format: (value) => Math.round(value) + 'px',
-                onChange: (value) => patch({ marginX: value }),
-              }),
-              h('span', { style: hintStyle }, '水平'))),
-          h(Field, { title: '垂直边距', desc: '离屏幕上下的距离' },
-            h(Slider, {
-              title: '垂直边距',
-              min: 0,
-              max: 400,
-              step: 1,
-              value: num(settings.marginY, 16),
-              format: (value) => Math.round(value) + 'px',
-              onChange: (value) => patch({ marginY: value }),
-            })),
-          h(Field, { title: '提示音', desc: '弹出时响一声，开会时可以关掉' },
-            h(Switch, {
-              title: '提示音',
-              checked: Boolean(settings.sound),
-              onChange: (value) => patch({ sound: value }),
-            })),
-        ),
-        h(
-          'div',
-          { style: hintStyle },
-          '保存立即生效，不用重启 DSH；测试通知用页面上的当前值，可以先试再保存。',
         ),
       )
     }

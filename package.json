@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-notify-win",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "Windows desktop notifications for DeepSeek Harness: idle, approval, question and error alerts, with a settings page, live preview and presets.",
   "license": "MIT",
@@ -42,10 +42,11 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "lib/*.js"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check client.js"
+    "check": "node --check index.js && node --check client.js && node --check lib/config.js && node --check lib/history.js && node --check lib/log.js && node --check lib/paths.js && node --check lib/renderer-host.js && node --check lib/schema.js && node --check lib/service.js"
   },
   "dsh": {
     "bundle": {
@@ -54,7 +55,9 @@
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-settings"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   }
 }
