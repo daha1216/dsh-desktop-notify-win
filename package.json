@@ -5,13 +5,13 @@
   "description": "Windows desktop notifications for DeepSeek Harness: idle, approval, question and error alerts, with a settings page, live preview and presets.",
   "license": "MIT",
   "author": "xiaotie3088",
-  "homepage": "https://github.com/xiaotie3088/dsh-desktop-notify-win",
+  "homepage": "https://github.com/daha1216/dsh-desktop-notify-win",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiaotie3088/dsh-desktop-notify-win.git"
+    "url": "git+https://github.com/daha1216/dsh-desktop-notify-win.git"
   },
   "bugs": {
-    "url": "https://github.com/xiaotie3088/dsh-desktop-notify-win/issues"
+    "url": "https://github.com/daha1216/dsh-desktop-notify-win/issues"
   },
   "os": [
     "win32"

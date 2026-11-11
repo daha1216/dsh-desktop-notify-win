@@ -32,7 +32,7 @@
 2. 粘贴仓库地址：
 
    ```
-   https://github.com/xiaotie3088/dsh-desktop-notify-win
+   https://github.com/daha1216/dsh-desktop-notify-win
    ```
 
 3. 点安装，装完刷新一次页面。
@@ -43,7 +43,7 @@
 ### 方式二：命令行
 
 ```powershell
-dsh plugin --profile desktop add https://github.com/xiaotie3088/dsh-desktop-notify-win
+dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win
 ```
 
 把 `desktop` 换成你的 profile 名。
@@ -83,7 +83,7 @@ dsh plugin --profile desktop add dsh-desktop-notify-win
 
 ## 本地改造记录
 
-这一份是本机定制版（基于上游 0.4.0）：
+这一份是定制版（基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)）：
 
 - 卡片不再用 WinForms 控件堆叠，改为分层窗口 + UpdateLayeredWindow 手绘：圆角、同心层投影、左侧渐变强调条、标题圆点、贴底进度条、顶部高光、淡入淡出，高度随正文行数自适应（最多 3 行）。
 - 渲染进程调用 SetProcessDPIAware，200% 缩放下按真实像素绘制。
