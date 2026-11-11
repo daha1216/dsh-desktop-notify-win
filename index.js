@@ -10,7 +10,7 @@ const SETTINGS_FILE = fileURLToPath(new URL('./settings.json', import.meta.url))
 const LOG = fileURLToPath(new URL('./notify-debug.log', import.meta.url))
 const CLICK_LOG = fileURLToPath(new URL('./notify-click.log', import.meta.url))
 const ROUTE = '/dsh-desktop-notify/api/config'
-const BUILD = 14
+const BUILD = 19
 
 const DEFAULTS = {
   accent: '#1f6beb',
@@ -23,6 +23,22 @@ const DEFAULTS = {
   marginX: 16,
   marginY: 16,
   opacity: 0.97,
+  radius: 12,
+  padX: 20,
+  padY: 16,
+  accentWidth: 4,
+  titleSize: 15,
+  bodySize: 13,
+  progress: true,
+  icon: true,
+  fade: true,
+  shadow: 0.45,
+  shine: 0.05,
+  font: 'Microsoft YaHei UI',
+  layout: 'bar',
+  status: '',
+  eyebrow: '',
+  scale: 1,
 }
 
 function log(event) {
@@ -49,6 +65,24 @@ function color(value, fallback) {
   return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : fallback
 }
 
+function bool(value, fallback) {
+  return value === undefined || value === null ? fallback : Boolean(value)
+}
+
+function font(value, fallback) {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > 64) return fallback
+  return /^[A-Za-z0-9 ,\-]+$/.test(trimmed) ? trimmed : fallback
+}
+
+function line(value, fallback, max) {
+  if (typeof value !== 'string') return fallback
+  const text = value.replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
 function sanitize(input, base) {
   const source = input && typeof input === 'object' ? input : {}
   const next = { ...base }
@@ -62,6 +96,22 @@ function sanitize(input, base) {
   next.opacity = clamp(source.opacity, 0.5, 1, base.opacity)
   next.sound = source.sound === undefined ? base.sound : Boolean(source.sound)
   next.corner = ['br', 'bl', 'tr', 'tl'].includes(source.corner) ? source.corner : base.corner
+  next.radius = clamp(source.radius, 0, 28, base.radius)
+  next.padX = clamp(source.padX, 12, 40, base.padX)
+  next.padY = clamp(source.padY, 10, 32, base.padY)
+  next.accentWidth = clamp(source.accentWidth, 0, 14, base.accentWidth)
+  next.titleSize = clamp(source.titleSize, 11, 22, base.titleSize)
+  next.bodySize = clamp(source.bodySize, 10, 20, base.bodySize)
+  next.shadow = clamp(source.shadow, 0, 1, base.shadow)
+  next.shine = clamp(source.shine, 0, 0.3, base.shine)
+  next.progress = bool(source.progress, base.progress)
+  next.icon = bool(source.icon, base.icon)
+  next.fade = bool(source.fade, base.fade)
+  next.font = font(source.font, base.font)
+  next.layout = source.layout === 'card' || source.layout === 'dsh' ? source.layout : 'bar'
+  next.status = line(source.status, base.status, 40)
+  next.eyebrow = line(source.eyebrow, base.eyebrow, 16)
+  next.scale = clamp(source.scale, 0.5, 1.5, base.scale)
   return next
 }
 
@@ -115,6 +165,15 @@ function sessionTitleOf(context, agent) {
   }
 }
 
+const STATUS_TEXT = {
+  idle: '点击卡片切回会话',
+  error: '点击卡片查看错误',
+  question: '正在等待你的回答',
+  approval: '等待你授权，点击查看',
+  test: '当前设置的效果预览',
+  startup: '插件已加载',
+}
+
 function showCard(settings, key, title, body, agentId, sessionTitle) {
   const detail = sessionTitle ? '会话：' + sessionTitle + '\n' + body : body
   const child = spawn(
@@ -138,6 +197,23 @@ function showCard(settings, key, title, body, agentId, sessionTitle) {
         DSH_NOTIFY_MY: String(settings.marginY),
         DSH_NOTIFY_OPACITY: String(settings.opacity),
         DSH_NOTIFY_SOUND: settings.sound ? '1' : '0',
+        DSH_NOTIFY_RADIUS: String(settings.radius),
+        DSH_NOTIFY_PADX: String(settings.padX),
+        DSH_NOTIFY_PADY: String(settings.padY),
+        DSH_NOTIFY_ACCENT_W: String(settings.accentWidth),
+        DSH_NOTIFY_TITLE_SIZE: String(settings.titleSize),
+        DSH_NOTIFY_BODY_SIZE: String(settings.bodySize),
+        DSH_NOTIFY_PROGRESS: settings.progress ? '1' : '0',
+        DSH_NOTIFY_ICON: settings.icon ? '1' : '0',
+        DSH_NOTIFY_FADE: settings.fade ? '1' : '0',
+        DSH_NOTIFY_SHADOW: String(settings.shadow),
+        DSH_NOTIFY_SHINE: String(settings.shine),
+        DSH_NOTIFY_FONT: settings.font,
+        DSH_NOTIFY_LAYOUT: settings.layout,
+        // The dsh card owns a countdown/pause line of its own when status is empty.
+        DSH_NOTIFY_STATUS: settings.status || (settings.layout === 'dsh' ? '' : STATUS_TEXT[key] || STATUS_TEXT.idle),
+        DSH_NOTIFY_EYEBROW: settings.eyebrow || '',
+        DSH_NOTIFY_SCALE: String(settings.scale),
       },
     },
   )
