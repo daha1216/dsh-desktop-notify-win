@@ -27,7 +27,7 @@ BUILD 20-22 的核心变化：
 
 当前状态：
 
-- 代码与静态测试在 BUILD 22 工作副本里完成；fork 已推送到 e032130，desktop profile 的 lock 指向该 commit，安装目录是 0.5.3/BUILD 22。运行中的 DSH 仍是启动时加载的 0.5.2/BUILD 21，必须重启一次才会加载新代码；这一点是本轮唯一未完成的真机验证。
+- 代码与静态测试在 BUILD 22 工作副本里完成；fork 上的代码 commit 是 e032130，desktop profile 的 lock 也指向它，安装目录是 0.5.3/BUILD 22。运行中的 DSH 仍是启动时加载的 0.5.2/BUILD 21，必须重启一次才会加载新代码；这一点是本轮唯一未完成的真机验证。
 - BUILD 22 的运行期验证需要 DSH 重新加载插件和页面：host 端（点击事件 → /click）和客户端（轮询 → openSession）已经分别用自动化测试覆盖，但「点真实卡片 → 页面真的切到对应会话」这一段必须在重启 DSH 后做一次真机确认。
 - 工作副本本身不是 git 仓库；发布依靠复制进 fork 的克隆再提交。
 - 没有构建步骤。index.js / client.js / lib/*.js 直接是 ESM 源码，notify.ps1 直接由 powershell.exe 执行。
