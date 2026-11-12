@@ -817,7 +817,7 @@ window.__ModuleLoader__.load({
                 whiteSpace: 'nowrap',
               },
             },
-            '点击切回',
+            '点击切回会话',
             h('span', { style: { fontSize: dshLinkSize + 1 + 'px' } }, '›'),
           ),
         ),
@@ -922,6 +922,67 @@ window.__ModuleLoader__.load({
 
 
     const API = '/dsh-desktop-notify/api'
+    const CLICK_POLL_MS = 400
+    const CLICK_MAX_AGE_MS = 60000
+
+    function watchClickedSessions(ctx) {
+      let stopped = false
+      let inFlight = false
+      let lastSeq = 0
+      const startedAt = Date.now()
+      const poll = () => {
+        if (stopped || inFlight) return
+        inFlight = true
+        fetch(API + '/click', { cache: 'no-store' })
+          .then((response) => (response.ok ? response.json() : null))
+          .then((data) => {
+            if (stopped || !data || !data.click) return
+            const click = data.click
+            const seq = Number(click.seq)
+            if (!Number.isFinite(seq) || seq <= lastSeq) return
+            lastSeq = seq
+            if (typeof click.at !== 'number' || click.at < startedAt - 2000) return
+            if (Date.now() - click.at > CLICK_MAX_AGE_MS) return
+            if (typeof click.sessionId !== 'string' || !click.sessionId) return
+            let workspace
+            try {
+              workspace = ctx.get('uiWorkspace')
+            } catch {
+              return
+            }
+            if (!workspace || typeof workspace.openSession !== 'function') return
+            try {
+              workspace.openSession(click.sessionId)
+            } catch {
+              try {
+                const sessions = ctx.get('sessions')
+                const address = sessions && typeof sessions.subagentAddress === 'function'
+                  ? sessions.subagentAddress(click.sessionId)
+                  : undefined
+                if (address && address.parentSessionId) workspace.openSession(address.parentSessionId)
+              } catch {
+                // The notification still focused the DSH window; a stale session
+                // must not surface an error over the conversation.
+              }
+            }
+          })
+          .catch(() => {})
+          .then(() => {
+            inFlight = false
+          })
+      }
+      const timer = window.setInterval(poll, CLICK_POLL_MS)
+      const wake = () => poll()
+      document.addEventListener('visibilitychange', wake)
+      window.addEventListener('focus', wake)
+      poll()
+      return () => {
+        stopped = true
+        window.clearInterval(timer)
+        document.removeEventListener('visibilitychange', wake)
+        window.removeEventListener('focus', wake)
+      }
+    }
 
     const EVENT_LABELS = {
       turnEnd: '本轮完成',
@@ -1164,8 +1225,8 @@ window.__ModuleLoader__.load({
         { key: 'onStartup', event: 'startup', label: '插件启动', desc: 'DSH 启动或插件重载后弹一条' },
       ])
       const fonts = (meta && Array.isArray(meta.fonts) && meta.fonts.length ? meta.fonts : FONTS)
-      const version = (meta && meta.version) || config.version || '0.5.2'
-      const build = (meta && meta.build) || config.build || 21
+      const version = (meta && meta.version) || config.version || '0.5.3'
+      const build = (meta && meta.build) || config.build || 22
       const layout = settings.layout
       const isDsh = layout === 'dsh'
       const isCard = layout === 'card'
@@ -1379,10 +1440,10 @@ window.__ModuleLoader__.load({
             onChange: (value) => patch({ monitor: value }),
           }),
         ),
-        h(Row, { title: '点击卡片', desc: '默认切回 DSH；选“不处理”时只关闭卡片' },
+        h(Row, { title: '点击卡片', desc: '默认切回 DSH 并打开对应会话；选“只关闭”时不跳转' },
           h(Segmented, {
             label: '点击卡片', value: settings.clickAction,
-            options: [{ value: 'focus', label: '切回 DSH' }, { value: 'none', label: '不处理' }],
+            options: [{ value: 'focus', label: '切回并打开会话' }, { value: 'none', label: '只关闭' }],
             onChange: (value) => patch({ clickAction: value }),
           }),
         ),
@@ -1615,7 +1676,7 @@ window.__ModuleLoader__.load({
           h(SummaryLine, { label: '停留', value: formatSeconds(settings.durationMs) }),
           h(SummaryLine, { label: '最多同屏', value: settings.maxVisible + ' 张' }),
           h(SummaryLine, { label: '免打扰', value: settings.quietEnabled ? settings.quietStart + '–' + settings.quietEnd : '关闭' }),
-          h(SummaryLine, { label: '点击', value: settings.clickAction === 'focus' ? '切回 DSH' : '只关闭' }),
+          h(SummaryLine, { label: '点击', value: settings.clickAction === 'focus' ? '切回并打开会话' : '只关闭' }),
         ),
         h('button', { type: 'button', onClick: test, disabled: busy, style: Object.assign({}, primaryButton, { opacity: busy ? 0.6 : 1 }) }, '用当前值测试'),
       )
@@ -1643,6 +1704,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        ctx.effect(() => watchClickedSessions(ctx), 'desktop-notify click navigation')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'desktop-notify', order: 30, label: '桌面通知' },

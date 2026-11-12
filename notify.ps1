@@ -804,7 +804,7 @@ public class DshToast : Form
             dshMetaFont = new Font(family, dshMetaPx, FontStyle.Regular, GraphicsUnit.Pixel);
             dshLinkFont = new Font(family, dshLinkPx, FontStyle.Regular, GraphicsUnit.Pixel);
             dshAppText = envEyebrow.Length > 0 ? envEyebrow : "DeepSeek Harness";
-            dshLinkText = "\u70b9\u51fb\u5207\u56de \u203a";
+            dshLinkText = "\u70b9\u51fb\u5207\u56de\u4f1a\u8bdd \u203a";
             dotColor = accent;
 
             if (highContrast)

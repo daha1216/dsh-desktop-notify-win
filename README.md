@@ -1,8 +1,8 @@
 # DSH 桌面通知（Windows）
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的 Windows 桌面通知插件：**本轮完成、需要你回答、需要授权、agent 出错、插件就绪**时，在屏幕角落弹一张卡片。点一下卡片就切回 DSH 所在的虚拟桌面并聚焦。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的 Windows 桌面通知插件：**本轮完成、需要你回答、需要授权、agent 出错、插件就绪**时，在屏幕角落弹一张卡片。点一下卡片就切回 DSH 所在的虚拟桌面，并直接打开对应的会话。
 
-这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 21，版本 0.5.2），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
+这一份是 [xiaotie3088/dsh-desktop-notify-win](https://github.com/xiaotie3088/dsh-desktop-notify-win) 的定制版（BUILD 22，版本 0.5.3），在原版基础上重做了设置页、渲染宿主与通知调度，详见文末「本地改造记录」。
 
 - 适用于 Windows 10/11 上的 DSH 桌面版 / Web GUI
 - 纯本地运行，不联网、不收集数据
@@ -24,7 +24,7 @@
 - **不打扰正在干活的你**：DSH 在前台、全屏应用 / 系统勿扰（Windows 通知状态 2/3/4/7）、专注助手（状态 6）都可以分别抑制。被抑制的通知会保留在历史里，写明原因。
 - **最多同屏几张**：1–5 张，超出的直接关掉最早一张（不是排队）。
 - **显示器可选**：跟随鼠标所在屏，或固定主屏。
-- **点击行为可选**：点了切回 DSH（会切虚拟桌面并聚焦，尽量不改变窗口大小），或只关卡片。DSH 版式下点右上角 × 永远只关卡片。
+- **点击行为可选**：默认点了切回 DSH（会切虚拟桌面并聚焦，尽量不改变窗口大小）并打开这张通知对应的会话；也可以选只关卡片。DSH 版式下点右上角 × 永远只关卡片。通知对应的会话已经不存在时，只切回 DSH，不弹错误。
 - **三种版式 + 八套预设**：横条、卡片、DSH 白卡。预设只是起点，所有参数都能继续微调。
 - **设置页即时预览**：右侧按当前表单值实时渲染，保存后立即生效，不用重启 DSH。
 - **测试通知**：不保存也能先看效果。
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add dsh-desktop-notify-win
 ## 使用
 
 - 正常用 DSH；触发时卡片自动出现。
-- 鼠标移上去暂停倒计时，移开继续；点卡片按「点击行为」处理。
+- 鼠标移上去暂停倒计时，移开继续；点卡片按「点击行为」处理：默认切回 DSH 并打开对应会话，选「只关闭」则只关卡片。
 - 设置页顶部有「测试通知 / 保存」；没保存时标题旁会显示「未保存」，刷新或关页面会提示。
 - 「最近通知」里每条都带事件类型、时间、显示状态；点「重播」会用它当时的文案再弹一次；重播是强制显示，不受事件开关、免打扰和前台 / 全屏抑制影响。
 
@@ -127,7 +127,7 @@ dsh plugin --profile desktop add dsh-desktop-notify-win
 
 ## 资源占用
 
-- 空闲时：DSH 进程里的一小段 JS，无轮询、无网络请求。
+- 空闲时：DSH 进程里的一小段 JS。页面打开时，客户端每 400ms 请求一次本机 `/click` 接口，用来把「点击了通知」变成「打开对应会话」；这是本机回环请求，数据量只有几十字节，不联网、不上传。
 - 第一张卡片出现时启动**一个常驻的 `powershell.exe` 渲染宿主**，之后所有卡片都复用它，不再每弹一次起一个进程。宿主随插件卸载 / DSH 退出而结束；连续启动失败时会退回到「每次一张短命进程」的模式。
 - 设置页只在打开时渲染。
 
@@ -147,6 +147,9 @@ dsh plugin --profile desktop add dsh-desktop-notify-win
 
 **更新插件时连续两次提权？**
 一次更新包含 `remove_bundle` + `install_bundle` 两步，两次都可能弹卡片。
+
+**点了通知，但页面没有跳到对应会话？**
+先确认「点击行为」是「切回并打开会话」而不是「只关闭」。如果卡片对应的会话已经被删除，或者 DSH 页面是在点击之后才打开/刷新的，就只会切回 DSH。还要注意：插件更新或修改后，需要刷新一次 DSH 页面，客户端的新代码才会开始轮询。
 
 **DSH 白卡底部为什么不显示倒计时？**
 真实通知里，状态行始终有内容：你填了「状态行文案」就用你的，没填就用当前事件的默认文案（如「等待你的确认」）。「N 秒后收起 · 悬停可保留」只在状态行为空时出现，而插件不会传空，所以只有直接调用 `notify.ps1` 或预览无状态卡片时才能看到。
@@ -183,7 +186,7 @@ dsh plugin --profile desktop rm dsh-desktop-notify-win
 - 详细交接、几何参数与踩坑记录见 [HANDOFF.md](./HANDOFF.md)。
 
 ```powershell
-npm run check   # node --check：index / client / lib 下 7 个模块
+npm run check   # node --check：index / client / lib 下 8 个模块
 ```
 
 单帧渲染调试（不弹窗）：
@@ -198,7 +201,7 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 
 ## 本地改造记录
 
-基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 21（0.5.2）的主要改动：
+基于上游 [0.4.0](https://github.com/xiaotie3088/dsh-desktop-notify-win)，BUILD 22（0.5.3）的主要改动：
 
 - **通知文案贴合任务**：新增 `lib/summary.js`，本轮完成时从会话事件里取最后一轮 assistant 回复的第一句，需要回答时直接取请求里的 `header` + `question`；只用于通知正文，不改变会话记录。
 - **拆分模块**：原来的单文件 host 拆成 `index.js` + `lib/`（schema / summary / service / config / history / log / paths / renderer-host），渲染与调度分离。
@@ -207,10 +210,11 @@ powershell -File notify.ps1 -Snapshot .\snap.png
 - **设置页重写**：六段式布局 + 固定实时预览 + 数据目录 / 导入导出 / 恢复默认 + WCAG 对比度提示。
 - **三版式与八预设**：保留上游的横条、卡片，新增逐像素复刻的 DSH 白卡；预设从 4 套扩到 8 套。
 - **自绘渲染**：分层窗口 + `UpdateLayeredWindow` 手绘，圆角、同心层投影、渐变强调条、顶部高光、淡入淡出；高度随正文行数自适应；按显示器 DPI × 整体缩放绘制。
-- **DSH 白卡**：图标板 + 手绘鲸鱼、`Segoe UI Semibold` 应用名、字号按 `titleSize` / `bodySize` 固定倍率派生（1.60 / 1.385）、正文行距 1.69、双层差分描边（上左 2px、下右 1px）、彩色状态点 + 「点击切回 ›」、右上 × 独立热区；配色由底色与文字色混合派生，浅色底补一点冷色。
+- **DSH 白卡**：图标板 + 手绘鲸鱼、`Segoe UI Semibold` 应用名、字号按 `titleSize` / `bodySize` 固定倍率派生（1.60 / 1.385）、正文行距 1.69、双层差分描边（上左 2px、下右 1px）、彩色状态点 + 「点击切回会话 ›」、右上 × 独立热区；配色由底色与文字色混合派生，浅色底补一点冷色。
 - **调试**：`notify.ps1 -Snapshot <path>` 直接把静态帧写成 PNG。
 - **0.5.1 修复**：常驻宿主下通知关闭后，1000ms 的 KeepTop 定时器仍会访问已释放的窗体，触发 .NET 未处理异常（对象名 DshToast）。现在窗体关闭时停止 uiTimer / keepTimer，并在 KeepTop 回调里先检查 IsDisposed；配套回归测试当时已通过（临时目录已清理）。
 - **0.5.2 文案**：turnEnd 和 question 的正文改为真实任务内容，摘要逻辑与边界见 HANDOFF 8.5。
+- **0.5.3 点击跳转**：点击卡片除了切回 DSH，还会打开这张通知对应的会话。renderer-host 把 `dismissed(by=click)` 转给 host，host 用通知 id 查 service 的 targets 映射（回退到 history 里的 `agentId`），通过 `GET /click` 暴露最近一次点击；客户端每 400ms 轮询一次，用 `uiWorkspace.openSession(sessionId)` 完成跳转。`clickAction='none'`、DSH 右上角 ×、会话已删除时都不跳转。
 
 ## 许可证
 

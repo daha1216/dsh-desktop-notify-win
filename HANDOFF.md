@@ -1,19 +1,19 @@
-# dsh-desktop-notify-win 定制版 · BUILD 21 交接文档
+# dsh-desktop-notify-win 定制版 · BUILD 22 交接文档
 
-最后更新：2026-11-11
+最后更新：2026-11-12
 代码位置：D:\dsh work\dsh-desktop-notify-win
 发布仓库：https://github.com/daha1216/dsh-desktop-notify-win
 上游：https://github.com/xiaotie3088/dsh-desktop-notify-win
 
-本文描述 BUILD 21（版本 0.5.2，含通知文案摘要与常驻宿主关闭定时器修复）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 21 的代码修正了几处旧结论。
+本文描述 BUILD 22（版本 0.5.3，含点击通知跳转到对应会话、通知文案摘要与常驻宿主关闭定时器修复）的代码、配置、运行时和验证方法。它是给下一个接手的人看的：先读第 0 节判断现状，需要动手时直接看第 3、4、5、8、12 节。三版式的几何细节在第 2 节，仍沿用 BUILD 17-19 的实测数据，但已经按 BUILD 22 的代码修正了几处旧结论。
 
 ---
 
 ## 0. TL;DR
 
-这个插件给 DeepSeek Harness 提供 Windows 桌面通知：本轮完成、需要回答、需要授权、执行出错、插件启动这五类事件发生时，在屏幕角落弹一张自绘卡片。点卡片会切回 DSH 所在的虚拟桌面并聚焦，不抢当前窗口焦点。
+这个插件给 DeepSeek Harness 提供 Windows 桌面通知：本轮完成、需要回答、需要授权、执行出错、插件启动这五类事件发生时，在屏幕角落弹一张自绘卡片。点卡片会切回 DSH 所在的虚拟桌面，并打开这张通知对应的会话；不跳转的「只关闭」模式仍然保留。
 
-BUILD 20 的核心变化：
+BUILD 20-22 的核心变化：
 
 - host 端从单文件拆成 index.js + lib/ 八个模块，通知编排、文案摘要、配置、历史、日志、路径、渲染宿主各自独立。
 - notify.ps1 新增 -Serve 常驻宿主模式：第一张卡片出现时启动一个 powershell.exe，之后所有卡片复用；连续失败才回退到每次一个短命进程。
@@ -23,10 +23,12 @@ BUILD 20 的核心变化：
 - 八套预设、三种版式保留；dsh 白卡仍按参考图逐像素复刻，但颜色、圆角、高光、缩放已经统一走通用卡片路径。
 - 修复了旧版若干行为不一致：事件关闭也写历史、maxVisible 实际是淘汰最早而不是排队、所有事件到点自动收起、状态行/应用名的长度上限与服务端对齐。
 - BUILD 21 把通知正文接到真实任务上：turnEnd 取最后一轮 assistant 文本的第一句（最多 120 字），question 取请求里的 header + question；approval/error 不变。
+- BUILD 22 把点击接到会话上：卡片点击先由 notify.ps1 的 FormClosed 回报 `dismissed(by=click)`，host 用通知 id 找回 `SessionId`，客户端轮询 `/click` 后调用 `uiWorkspace.openSession(sessionId)`。
 
 当前状态：
 
-- 代码与静态测试在 BUILD 21 工作副本里完成；发布和安装状态请看 8.7 的清单，以远端 commit 和 profile 里的 package.json 为准。
+- 代码与静态测试在 BUILD 22 工作副本里完成；profile 安装目录已替换为 0.5.3/BUILD 22，但运行中的 DSH 仍是启动时加载的旧插件。远端 commit 和最终安装状态请看 8.8 的清单。
+- BUILD 22 的运行期验证需要 DSH 重新加载插件和页面：host 端（点击事件 → /click）和客户端（轮询 → openSession）已经分别用自动化测试覆盖，但「点真实卡片 → 页面真的切到对应会话」这一段必须在重启 DSH 后做一次真机确认。
 - 工作副本本身不是 git 仓库；发布依靠复制进 fork 的克隆再提交。
 - 没有构建步骤。index.js / client.js / lib/*.js 直接是 ESM 源码，notify.ps1 直接由 powershell.exe 执行。
 
@@ -145,7 +147,7 @@ dsh 分支（notify.ps1 约 824-853 行）使用固定逻辑像素再乘 scale�
 | footer 高 | 32×scale |
 | 卡片高 | footerTop + 32×scale + 14.5×scale，下限 97×scale |
 | footer 圆点 | x=文字左边界，y=footerTop+15.5×scale，7×7.6×scale |
-| 链接文案 | “点击切回 ›”，右对齐，区域从 card.Right-25-300 起，宽 300×scale，高 footerH |
+| 链接文案 | “点击切回会话 ›”，右对齐，区域从 card.Right-25-300 起，宽 300×scale，高 footerH |
 | 关闭 × | 中心 (card.Right-39×scale, card.Y+41×scale)，半臂 5×scale，笔宽 2×scale，圆头 |
 | 关闭热区 | (card.Right-54×scale, card.Y+26×scale, 30×scale, 30×scale) |
 
@@ -200,7 +202,7 @@ dsh 的底色、文字色、圆角、高光、阴影都走通用卡片路径，�
 
 ## 3. 代码地图
 
-### 3.1 index.js（332 行）
+### 3.1 index.js（361 行）
 
 host 插件入口，inject 为 webServer + connection。
 
@@ -211,11 +213,13 @@ host 插件入口，inject 为 webServer + connection。
 | sessionTitleOf / withTitle / assistantSummaryOf | 58-89 | 会话标题、通知 agent 上下文、取本轮最后一轮 assistant 摘要 |
 | isRootAgent / errorMessage | 91-109 | 根 agent 判断、错误文案（截 160 字） |
 | ensureApprovalWatcher | 111-141 | root.on('session/event') 监听 approval/asked，工具名兼容 data.toolName 与 toolName，1500ms 去重；全局单例，插件重载不断监听 |
-| apply 初始化 | 143-186 | resolvePaths → createLogger → SettingsStore.load → HistoryStore → getRendererHost → NotificationService |
-| pickPreviewAgent | 151-171 | 给测试/重播找一个可用的 agent 上下文 |
-| 事件接线 | 188-230 | agent/status（idle + root）触发 turnEnd 250ms 去抖并传摘要；agent/error；user-questions/request（prepend）先弹 question（带实际问题）再 next；watcher.dispatch 弹 approval |
-| HTTP 路由 | 232-310 | 见 5.4 |
-| startup timer / cleanup / apply 日志 | 312-331 | onStartup 时 800ms 后弹 startup；dispose 时清 timer、解除 dispatch、dispose service、resetRendererHost |
+| apply 初始化 | 143-200 | resolvePaths → createLogger → SettingsStore.load → HistoryStore → getRendererHost → NotificationService；service 变量先声明后赋值，供点击处理器引用 |
+| handleHostEvent | 149-170 | 处理宿主回报的 dismissed(by=click)：clickAction none 跳过；用通知 id 查 service.targets / history.agentId；写 lastClick 与 click-session / click-no-session 日志 |
+| pickPreviewAgent | 174-194 | 给测试/重播找一个可用的 agent 上下文 |
+| applySettings | 204-210 | sanitize → SettingsStore.save → 更新闭包 settings → 日志 |
+| 事件接线 | 212-254 | agent/status（idle + root）触发 turnEnd 250ms 去抖并传摘要；agent/error；user-questions/request（prepend）先弹 question（带实际问题）再 next；watcher.dispatch 弹 approval |
+| HTTP 路由 | 255-343 | 见 5.4，含 GET /click |
+| startup timer / cleanup / apply 日志 | 345-360 | onStartup 时 800ms 后弹 startup；dispose 时清 timer、解除 dispatch、dispose service、resetRendererHost，并在 handler 仍属于自己时清空 host.onEvent |
 
 注意两点：
 
@@ -227,15 +231,15 @@ host 插件入口，inject 为 webServer + connection。
 | 文件 | 行数 | 职责 |
 |---|---|---|
 | lib/schema.js | 300 | VERSION/BUILD、43 个 DEFAULTS、LIMITS、FONTS、EVENTS、SEMANTIC_ACCENTS、8 个 PRESETS、sanitize、isQuietHours、eventEnabled、accentForEvent |
-| lib/summary.js | 85 | assistantSummary（最后一轮 assistant 文本）、questionSummary、cleanInline、clip、firstSentence |
-| lib/service.js | 229 | NotificationService：compose、抑制、合并、payload 组装、历史、预览、重播、turnEnd 去抖 |
-| lib/renderer-host.js | 296 | 常驻 notify.ps1 -Serve 宿主管理、StringDecoder 行解析、请求超时、重启上限、一次性回退 |
+| lib/summary.js | 87 | assistantSummary（最后一轮 assistant 文本）、questionSummary、cleanInline、clip、firstSentence |
+| lib/service.js | 246 | NotificationService：compose、抑制、合并、payload 组装、历史、预览、重播、turnEnd 去抖、通知 id → SessionId 映射 |
+| lib/renderer-host.js | 299 | 常驻 notify.ps1 -Serve 宿主管理、StringDecoder 行解析、请求超时、重启上限、一次性回退、宿主事件回调 |
 | lib/config.js | 68 | SettingsStore：data → package 迁移 → defaults，sanitize 后原子写 |
 | lib/history.js | 76 | 最近 50 条，原子写，load/add/update/get/list/clear |
 | lib/log.js | 25 | JSON 行日志，256KB 截断，serializeError |
 | lib/paths.js | 35 | DSH_HOME / DSH_NOTIFY_DATA_DIR → dataDir、settings、history、log、clickLog、packageSettings |
 
-### 3.3 client.js（1655 行）
+### 3.3 client.js（1717 行）
 
 | 区域 | 行 | 作用 |
 |---|---|---|
@@ -243,55 +247,56 @@ host 插件入口，inject 为 webServer + connection。
 | WHALE_PATH | 287 | 鲸鱼 SVG path，viewBox 0 0 50 50 |
 | 基础控件 | 340-488 | Field、ColorField、Slider、Switch、PresetCard |
 | ToastPreview | 490-922 | 实时预览，dsh DOM 在 722-839 行；footer 在 status 为空时显示倒计时演示文案 |
-| API 与常量 | 924-1006 | API='/dsh-desktop-notify/api'、EVENT_LABELS、SUPPRESS_LABELS、LAYOUT_LABELS、FALLBACK、getJson/postJson、WCAG 对比度、formatSeconds |
-| Row / SubHead / Segmented / Chip / SummaryLine | 1008-1100 | 设置页排版控件；Row 用 useId + aria-labelledby |
-| SettingsPage | 1102-1644 | 见下方分段 |
-| 注册 | 1646-1655 | settings.section，id desktop-notify，order 30，label 桌面通知 |
+| API 与常量 | 924-1067 | API='/dsh-desktop-notify/api'、CLICK_POLL_MS=400、CLICK_MAX_AGE_MS=60000、watchClickedSessions、EVENT_LABELS、SUPPRESS_LABELS、LAYOUT_LABELS、FALLBACK、getJson/postJson、WCAG 对比度、formatSeconds |
+| Row / SubHead / Segmented / Chip / SummaryLine | 1069-1161 | 设置页排版控件；Row 用 useId + aria-labelledby |
+| SettingsPage | 1163-1705 | 见下方分段 |
+| 注册 | 1707-1717 | 先 ctx.effect 启动 watchClickedSessions，再 settings.section（id desktop-notify，order 30，label 桌面通知） |
 
 SettingsPage 的分段锚点：
 
-- 1102-1132：state、加载 /config 后并行 /meta、busy/status/saved
-- 1136-1146：dirty（JSON 比较）、beforeunload 拦截
-- 1156-1168：defaults/limits/presets/events/fonts/version/build 兜底
-- 1173-1235：patch、save、loadHistory、test、replay、clearHistory
-- 1237-1280：applyPreset、exportSettings、applyImport、resetDefaults
-- 1282-1296：对比度、ignored 字段、layoutOptions
-- 1298-1324：header（版本、BUILD、dataDir、未保存、测试、保存）与 status
-- 1328-1338：通知什么（5 个 Switch）
-- 1340-1391：什么时候不打扰（免打扰、前台、全屏、专注助手、最多同屏、显示器、点击行为）
-- 1393-1535：样式（版式、预设、停留时长、提示音、缩放、外观细节）
-- 1459-1535：尺寸与位置、文字、效果、无障碍；含弹出位置 corner 与水平/垂直边距 marginX/marginY
-- 1537-1581：最近通知（最多显示 30 条）
-- 1583-1606：数据与维护（dataDir、loadedFrom、导出、导入、恢复默认）
-- 1608-1627：实时预览（ToastPreview + 5 行摘要 + 用当前值测试）
-- 1610-1644：两栏布局，左栏五段，右栏 sticky 预览
+- 1163-1193：state、加载 /config 后并行 /meta、busy/status/saved
+- 1195-1205：dirty（JSON 比较）、beforeunload 拦截
+- 1215-1227：defaults/limits/presets/events/fonts/version/build 兜底
+- 1232-1294：patch、save、loadHistory、test、replay、clearHistory
+- 1296-1339：applyPreset、exportSettings、applyImport、resetDefaults
+- 1341-1355：对比度、ignored 字段、layoutOptions
+- 1357-1387：header（版本、BUILD、dataDir、未保存、测试、保存）与 status
+- 1389-1399：通知什么（5 个 Switch）
+- 1401-1452：什么时候不打扰（免打扰、前台、全屏、专注助手、最多同屏、显示器、点击行为）
+- 1454-1596：样式（版式、预设、停留时长、提示音、缩放、外观细节）
+- 1520-1573：尺寸与位置、文字；含弹出位置 corner 与水平/垂直边距 marginX/marginY
+- 1575-1596：效果与无障碍
+- 1598-1642：最近通知（最多显示 30 条）
+- 1644-1667：数据与维护（dataDir、loadedFrom、导出、导入、恢复默认）
+- 1669-1688：实时预览（ToastPreview + 5 行摘要 + 用当前值测试）
+- 1690-1705：两栏布局，左栏五段，右栏 sticky 预览
 
 注意：状态行文案 maxLength=40、应用名 maxLength=16，与 schema 的截断上限一致；颜色对比度用 WCAG 公式，低于 4.5:1 时提示并可一键改为深色或白色文字。
 
-### 3.4 notify.ps1（1878 行，纯 ASCII）
+### 3.4 notify.ps1（1889 行，纯 ASCII）
 
 | 区域 | 行 | 作用 |
 |---|---|---|
 | param 与初始化 | 1-24 | -Quiet / -Diagnose / -Snapshot / -Serve；环境变量 title/body/timeout/logPath；Add-Type |
 | DshActions | 26-329 | FindDshWindow、FocusDsh、KeepTop、DumpWindows、NotificationState（SHQueryUserNotificationState）、IsDshForeground |
 | DshDpi | 331-378 | EnablePerMonitorV2（SetProcessDpiAwarenessContext -4 → SetProcessDpiAwareness 2 → SetProcessDPIAware）、ScaleFor(Screen)（GetDpiForMonitor） |
-| DshToast | 380-1550 | 单张卡片的窗口、样式、布局、绘制、动画、点击、快照 |
-| ReadStyle | 666-818 | 读取全部 DSH_NOTIFY_*，做 clamp、DPI 缩放、dsh 字号/配色派生 |
-| ComputeLayout | 820-922 | 三种版式的几何；dshCloseRect |
-| ComputePosition / ApplyStackOffset | 924-948 | 工作区角落定位、多卡纵向堆叠偏移 |
-| BuildStatic | 956-1072 | 投影、卡面、圆角、高光、描边、色条，然后分派到三种内容绘制 |
-| DrawCardContent | 1095-1171 | 图标板、eyebrow、标题、正文、状态行 |
-| DrawDshContent | 1173-1232 | 鲸鱼、应用名、标题、正文、footer 圆点、链接、关闭 × |
-| DrawDshFooterLabel | 1234-1254 | 三态 footer |
-| DrawWhale / WhalePts / WhaleCounts | 1256-1376 | 手绘鲸鱼 |
-| Render / PushLayered | 1377-1476 | 每帧合成透明度、进度条、状态环、dsh footer，UpdateLayeredWindow |
-| OnTick | 1478-1503 | 40ms 定时器，250ms 步进重绘，淡入 170ms / 淡出 240ms，超时关闭 |
-| ShowWithoutActivation / CreateParams / OnShown | 1505-1534 | 不抢焦点、分层窗口、首帧、提示音 |
-| SaveStatic | 1536-1550 | 静态快照 PNG |
-| DshCardSpec | 1552-1590 | 35 字段的宿主协议数据类 |
-| DshHost | 1593-1815 | 常驻宿主：stdin 线程、HostForm、ProcessLine、抑制判断、maxVisible、Relayout、Shutdown |
-| ApplyStyleEnv | 1817-1849 | 把 DshCardSpec 写成 DSH_NOTIFY_* 环境变量 |
-| 入口 | 1853-1878 | -Serve / -Diagnose / -Snapshot / 普通弹窗 |
+| DshToast | 380-1561 | 单张卡片的窗口、样式、布局、绘制、动画、点击、快照 |
+| ReadStyle | 670-822 | 读取全部 DSH_NOTIFY_*，做 clamp、DPI 缩放、dsh 字号/配色派生；807 行 dshLinkText=「点击切回会话 ›」 |
+| ComputeLayout | 824-926 | 三种版式的几何；dshCloseRect |
+| ComputePosition / ApplyStackOffset / CloseWith | 928-958 | 工作区角落定位、多卡纵向堆叠偏移、带原因的关闭 |
+| BuildStatic | 960-1097 | 投影、卡面、圆角、高光、描边、色条，然后分派到三种内容绘制 |
+| DrawCardContent | 1099-1175 | 图标板、eyebrow、标题、正文、状态行 |
+| DrawDshContent | 1177-1236 | 鲸鱼、应用名、标题、正文、footer 圆点、链接、关闭 × |
+| DrawDshFooterLabel | 1238-1258 | 三态 footer |
+| DrawWhale / WhalePts / WhaleCounts | 1260-1380 | 手绘鲸鱼 |
+| Render / PushLayered | 1381-1480 | 每帧合成透明度、进度条、状态环、dsh footer，UpdateLayeredWindow |
+| OnTick | 1482-1507 | 40ms 定时器，250ms 步进重绘，淡入 170ms / 淡出 240ms，超时关闭 |
+| OnFormClosed / ShowWithoutActivation / CreateParams / OnShown | 1509-1538 | 关闭时上报 dismissed（点击为 by=click）、不抢焦点、分层窗口、首帧、提示音 |
+| SaveStatic | 1540-1554 | 静态快照 PNG |
+| DshCardSpec | 1563-1600 | 35 字段的宿主协议数据类 |
+| DshHost | 1604-1826 | 常驻宿主：stdin 线程、HostForm、ProcessLine、抑制判断、maxVisible、Relayout、Shutdown |
+| ApplyStyleEnv | 1828-1860 | 把 DshCardSpec 写成 DSH_NOTIFY_* 环境变量 |
+| 入口 | 1864-1889 | -Serve / -Diagnose / -Snapshot / 普通弹窗 |
 
 DshToast 内部几个关键字段：scale、cardW/cardH/bitmapW/bitmapH/shadowPad、opacity/shadowStrength/shine、progressOn/iconOn/fadeOn、layout/statusText/cardEyebrow/cardTitle/cardMode/statusOn/dshMode、dshAppText/dshLinkText、dshCloseRect。
 
@@ -300,7 +305,7 @@ DshToast 内部几个关键字段：scale、cardW/cardH/bitmapW/bitmapH/shadowPa
 - cordis.patch.yml：向宿主插入 id=desktop-notify 的 bundle patch，config 里只放五个事件开关的初始值。
 - locale/zh.json、locale/en.json：目前只有 settings.section 的标题和描述，与版式无关。
 - icon.svg：设置页图标。
-- package.json：ESM、win32、node>=20、files 清单、dsh.bundle.patch、dsh.client 注入 @deepseek-ai/dsh-client-ui-settings、check 脚本检查 9 个 JS 文件。
+- package.json：ESM、win32、node>=20、files 清单、dsh.bundle.patch、dsh.client 注入 @deepseek-ai/dsh-client-ui-settings、check 脚本检查 10 个 JS 文件。
 
 ---
 
@@ -325,7 +330,7 @@ DshToast 内部几个关键字段：scale、cardW/cardH/bitmapW/bitmapH/shadowPa
 | respectFocusAssist | true | bool | 专注助手时不弹 |
 | maxVisible | 3 | 1-5 | 同屏上限；超出关闭最早一张 |
 | monitor | "cursor" | cursor/primary | 跟随鼠标所在屏或固定主屏 |
-| clickAction | "focus" | focus/none | 点击切回 DSH，或只关卡片 |
+| clickAction | "focus" | focus/none | focus：点击切回 DSH 并打开通知对应的会话；none：只关卡片 |
 
 ### 4.2 外观（29）
 
@@ -421,8 +426,8 @@ apply 的顺序：
 2. createLogger(paths.log) 建日志。
 3. new SettingsStore({paths, log}).load(ctx.config)：data 目录 settings.json 优先；没有则读插件目录 settings.json 迁移；都没有用 DEFAULTS。
 4. new HistoryStore(paths.history)。
-5. getRendererHost({log, clickLog: paths.clickLog})：进程内单例。
-6. new NotificationService(...)，传入 settings、history、host、log、previewAgent。
+5. 声明 handleHostEvent，再 getRendererHost({log, clickLog: paths.clickLog, onEvent: handleHostEvent})：进程内单例；handleHostEvent 只处理 dismissed + by=click。
+6. new NotificationService(...)，传入 settings、history、host、log、previewAgent，并把 service 赋给闭包变量。
 7. 注册事件、HTTP 路由、startup timer、cleanup。
 
 宿主 config 里的五个事件开关作为 legacy seed 传入。合并顺序是 DEFAULTS → legacy → data 文件，data 文件覆盖 legacy，所以用户在设置页关掉的事件不会被宿主默认配置重启回 true。
@@ -438,7 +443,7 @@ service.notify(event, options) 的顺序（lib/service.js:84）：
 3. 非 force 且事件开关关闭 → 写历史，suppressed='disabled'，返回。
 4. 非 force 且 isQuietHours → 写历史，suppressed='quiet'，返回。
 5. 非 force 且同 key 1500ms 内重复 → 写历史，suppressed='coalesced'，返回。key = event:agentId（没有 agentId 时用 event 本身）。
-6. 生成 id = 'n' + base36(now) + '-' + counter。
+6. 生成 id = 'n' + base36(now) + '-' + counter，并 rememberTarget(id, agentId)，供点击跳转查 SessionId。
 7. 组装 payload：cmd=show、全部外观字段、monitor、clickAction、maxVisible、highContrast、reduceMotion、suppress*；force 时三个 suppress* 全设为 false。
 8. 先写一条 shown=true 的历史，再 host.show(payload)。
 9. 宿主返回 shown=true → 记 notified 日志；返回 skipped → 历史改为 shown=false、suppressed=reason；异常 → suppressed='error'。
@@ -487,11 +492,11 @@ stdio 全部 pipe，环境变量继承 process.env，再叠加 DSH_NOTIFY_LOG=cl
 - stdin 线程逐行 ReadLine 入 ConcurrentQueue，EOF 入 __EOF__；HostForm 是 1×1 屏外、Opacity=0 的常驻窗口，40ms 定时器每 tick 最多处理 20 行。
 - show 先过 SuppressionReason：suppressFullscreen 且 NotificationState 为 2/3/4/7 → fullscreen；respectFocusAssist 且 state 为 6 → quiet；suppressForeground 且 IsDshForeground → foreground。命中发 skipped，不建卡片。
 - maxVisible clamp 1-5；cards.Count >= maxVisible 时关闭 cards 末尾最老的一张，CloseReason='replaced'，没有等待队列。
-- 卡片显示后发 shown；FormClosed 时从 cards 移除、Relayout、发 dismissed，by 默认 'closed'。
+- 卡片显示后发 shown；FormClosed 时从 cards 移除、Relayout、发 dismissed，by 默认 'closed'。renderer-host 把 dismissed/clicked/shown/skipped 转给 onEvent；插件只对 by=click 做跳转处理。
 - 多卡纵向堆叠：Relayout 按 cards 顺序 ApplyStackOffset，offset += WindowHeight + 2。
 - quit 时 CloseAll("shutdown")、发 bye、Application.Exit。
 
-CloseReason 取值：dsh 右上 × 是 close，普通点击是 click，右键是 dismiss，超时是 timeout，被替换是 replaced，clear 是 clear，shutdown 是 shutdown。dsh 点击处理先判关闭热区，命中只关窗；否则 clickAction != 'none' 时 FocusDsh 再 Close。FocusDsh 会切虚拟桌面并聚焦，尽量不改变窗口大小。
+CloseReason 取值：dsh 右上 × 是 close，普通点击是 click，右键是 dismiss，超时是 timeout，被替换是 replaced，clear 是 clear，shutdown 是 shutdown。dsh 点击处理先判关闭热区，命中只关窗；否则 clickAction != 'none' 时 FocusDsh 再 Close。FocusDsh 会切虚拟桌面并聚焦，尽量不改变窗口大小。点击事件本身不携带 SessionId，会话匹配由 host 的 handleHostEvent 完成（见 5.4 的 /click）。
 
 ### 5.4 HTTP API
 
@@ -502,12 +507,15 @@ CloseReason 取值：dsh 右上 × 是 close，普通点击是 click，右键是
 | GET | /meta | version、build、defaults、limits、presets、events、fonts、semanticAccents |
 | GET | /config 或 / | version、build、settings、history、loadedFrom、dataDir |
 | GET | /history | history 数组 |
+| GET | /click | 最近 60 秒内的一次点击 {seq, sessionId, id, at}；没有则为 null |
 | POST | /config action=save | sanitize + 原子写 + service.updateSettings；返回落盘后的 settings |
 | POST | /config action=test | sanitize(body.settings, 当前 settings) 后 service.preview；不落盘 |
 | POST | /config action=replay | 按 id 查历史并强制重播；找不到返回 404 |
 | POST | /config action=clear | 清空历史文件 |
 
 错误：未知 action 400；未知路由 404；body-too-large 413；其他异常 500 并记 route-error 日志。
+
+/click 的数据来自 handleHostEvent：sessionId 先查 service.sessionFor(id)（notify 时写入的 targets，容量 120），再回退到 history.get(id).agentId；两者都没有就记 click-no-session，不覆盖上一次有效点击。客户端每 400ms 轮询，按 seq 去重，只在窗口可见或重新聚焦时立即补一次；拿到 sessionId 后调用 uiWorkspace.openSession(sessionId)，抛错时回退到 sessions.subagentAddress(sessionId).parentSessionId。
 
 ### 5.5 预览与重播
 
@@ -519,9 +527,9 @@ CloseReason 取值：dsh 右上 × 是 close，普通点击是 click，右键是
 
 history.json：{entries:[...]} 或数组，最多 50 条，新的在头部，原子写（.tmp-pid → rename）。字段：id、at、event、title、body、status、agentId、sessionTitle、shown、suppressed。UI 只显示最近 30 条，可以清空（两段确认）和重播。
 
-notify.log：JSON 行，字段 t + evt + 其他。常见 evt：apply、settings-saved、settings-migrated、settings-migrate-error、notified、notify-skipped、notify-error、history-error、route-error、approval-dispatch、renderer-* 等。文件超过 256KB 时截断。
+notify.log：JSON 行，字段 t + evt + 其他。常见 evt：apply、settings-saved、settings-migrated、settings-migrate-error、notified、notify-skipped、notify-error、history-error、route-error、approval-dispatch、click-session、click-no-session、renderer-* 等。文件超过 256KB 时截断。
 
-notify-click.log：notify.ps1 自己写的点击/弹出日志，由 DSH_NOTIFY_LOG 指定；常驻宿主用 clickLog 路径启动，一次性回退同时传 LOG 和 CLICK_LOG。
+notify-click.log：notify.ps1 自己写的点击/弹出日志，由 DSH_NOTIFY_LOG 指定；常驻宿主用 clickLog 路径启动，一次性回退同时传 LOG 和 CLICK_LOG。它记录 target hwnd、onCurrent、finalForeground，但不会记录 SessionId。
 
 ### 5.7 资源与生命周期
 
@@ -565,7 +573,7 @@ notify-click.log：notify.ps1 自己写的点击/弹出日志，由 DSH_NOTIFY_L
     cd "D:\dsh work\dsh-desktop-notify-win"
     npm run check
 
-这会 node --check index.js、client.js 和 lib 下 7 个模块，共 9 个文件。0 退出码即通过。
+这会 node --check index.js、client.js 和 lib 下 8 个模块，共 10 个文件。0 退出码即通过。
 
 PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 
@@ -579,12 +587,15 @@ PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 
 ### 7.2 模块与路由测试
 
-临时测试脚本在 D:\dsh work\_bn20（发布前可删除，下面是用途）：
+临时测试脚本曾在 D:\dsh work\_bn20 和 D:\dsh work\_bn22（发布后可删除，下面是用途）：
 
 - verify-modules.mjs：22 项，覆盖 schema sanitize、quiet 时段、presets、history 原子写、config 迁移和 save 后 loadedFrom、log 截断、paths。
 - verify-index.mjs：13 项，假 webServer/connection 走 HTTP 路由，覆盖鉴权、meta/config/history、save/test/replay/clear、404、413、approval watcher。
 - verify-renderer.mjs：4 项，覆盖常驻宿主 ready/shown、available=false 时一次性回退、非 win32 拒绝、中文跨 chunk 解码。
 - render-client.mjs：用假 React 和假 ModuleLoader 渲染设置页，六组（bar/card/dsh × advanced false/true），检查六段标题、控件数量、预览文案、历史抑制文案。
+- test-click-host.mjs（BUILD 22）：假 ctx 走真实 apply + HTTP，验证默认 clickAction、turnEnd 历史 agentId、/click 返回、clickAction=none、未知 id 不覆盖。
+- test-click-client.mjs（BUILD 22）：vm 加载 client.js，假 fetch 与假 uiWorkspace，验证 openSession、seq 去重、旧 click 忽略、抛错回退父会话、启动前 click 忽略、cleanup 停止。
+- test-native-click.mjs（BUILD 22）：直接驱动 RendererHost 启动真实 notify.ps1 -Serve，显示 dsh 卡片后由人工点击，验证收到 dismissed(by=click)。
 
 运行方式：
 
@@ -618,7 +629,7 @@ PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 
 部署到 desktop profile 后，逐项确认：
 
-1. 设置页出现“桌面通知”，标题显示 v0.5.2 · BUILD 21 和 dataDir。
+1. 设置页出现“桌面通知”，标题显示 v0.5.3 · BUILD 22 和 dataDir。
 2. 六个分段都在；展开外观细节能看到 corner、marginX、marginY、色条宽度。
 3. 切换三种版式，右侧预览跟着变；dsh 预览有鲸鱼、DeepSeek Harness、状态行。
 4. 点测试通知，真实卡片出现；点保存后改一个颜色，再测试，颜色变化。
@@ -626,7 +637,7 @@ PowerShell 脚本用 Windows PowerShell 5.1 的 Parser 验证：
 6. 触发一次真实 turnEnd（或 startup），历史里出现记录。
 7. 把 DSH 切到前台再测试，若 suppressForeground=true，历史显示“未显示 · DSH 在前台”。
 8. 把 maxVisible 设为 1，连续测试两条，第一张应被替换。
-9. 点击真实卡片，确认能切回 DSH；再点 dsh 右上 ×，确认只关卡片不切桌面。
+9. 点击真实卡片，确认能切回 DSH 并打开通知对应的会话（重点看子 agent 的 turnEnd 通知是否落在子会话）；把设置页点击行为改成“只关闭”后再点，确认不跳转；再点 dsh 右上 ×，确认只关卡片不跳转。
 10. 检查 notify.log 和 notify-click.log 没有持续报错，宿主没有每次弹窗都新建进程。
 
 ---
@@ -690,7 +701,7 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 - 修法：OnFormClosed 里停止 uiTimer 和 keepTimer；keepTimer 回调先判断 IsDisposed / IsHandleCreated，并吞掉 ObjectDisposedException。
 - 回归：_bn20/test-host-timer.mjs，show 3 秒 → dismissed(timeout) → 等 2.5 秒 → ping → pong → quit，exit 0（6272ms）。旧实现在关闭后约 1 秒弹异常，收不到 pong。
 
-### 8.5 BUILD 21（当前，0.5.2）
+### 8.5 BUILD 21（0.5.2）
 
 问题：通知正文与具体任务无关。turnEnd 永远是固定文案“会话已空闲，切回去看看。”，question 永远是“Agent 在等你的回答。”，只能看出是哪个会话、哪类事件。
 
@@ -713,7 +724,33 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 - 摘要只取最后一条有文本的 assistant 消息；如果该轮以工具调用结束且没有文本，会回退到更早的文本。
 - 超过 120 字的文本会被截断，Markdown 结构丢失；只用于通知，不替代会话记录。
 
-### 8.6 client.js 截断事故（重要教训）
+### 8.6 BUILD 22（当前，0.5.3）
+
+问题：通知只能把人叫回 DSH，不能定位到具体会话；用户需要自己从列表里找是哪一轮、哪个子 agent 完成了。
+
+实现：
+
+- notify.ps1 的普通点击仍然只负责聚焦：CloseReason='click' → FormClosed 发 `dismissed(by=click)`；dsh 右上 × 发 by=close，不参与跳转。
+- lib/renderer-host.js 的 handle 把 dismissed/clicked/shown/skipped 交给 onEvent；getRendererHost 命中单例时允许替换 onEvent，插件重载不会丢掉新回调。
+- index.js 的 handleHostEvent 只认 `dismissed && by=click`；clickAction='none' 直接返回。sessionId 先查 service.sessionFor(id)，再回退 history 里的 agentId（`sessions` 服务证实 agent.id 就是 SessionId）。取不到就记 click-no-session，不制造一次空跳转。
+- lib/service.js 在 notify 生成 id 后 rememberTarget(id, agentId)，Map 上限 120；replay 不再把字符串 'replay' 当 agent。
+- `GET /click` 暴露最近一次有效点击（60 秒内），返回 {seq, sessionId, id, at}。用 seq 而不是时间戳去重，避免轮询重复打开。
+- client.js 的 watchClickedSessions 每 400ms 请求 /click；用 inFlight 防重入，按 seq 去重，丢弃页面启动前 2 秒以前和超过 60 秒的点击。拿到 sessionId 调 `uiWorkspace.openSession(sessionId)`；抛错时用 `sessions.subagentAddress(sessionId).parentSessionId` 回退。窗口 visibilitychange 或 focus 时立即补一次轮询。
+- 设置页点击行为文案改为“切回并打开会话 / 只关闭”，摘要与 dsh 预览链接文案同步改为“点击切回会话 ›”。
+
+验证：
+
+- `npm run check` exit 0；PowerShell Parser 错误 0。
+- `_bn22/test-click-host.mjs` 6/6、`_bn22/test-click-client.mjs` 7/7。
+- `_bn22/test-native-click.mjs` 真机显示 dsh 卡片并点击：notify-click.log 记录 target hwnd=DSH、onCurrent=True、setForeground=True；宿主收到 dismissed by=click。
+
+已知边界：
+
+- 运行中的 DSH 只有重新加载插件和刷新页面后才会用上 BUILD 22；本次只替换了安装目录，未重启宿主，因此端到端“点击 → 页面切会话”尚未真机确认。
+- 会话被删除或通知来自已结束的子 agent 时，openSession 可能抛错；客户端回退到父会话，父会话也取不到就只完成聚焦。
+- 点击跳转依赖页面处于打开状态并运行 watchClickedSessions；DSH 完全关闭时 /click 无人消费，点击只切桌面（如果有窗口）。
+
+### 8.7 client.js 截断事故（重要教训）
 
 2026-11-11 白天，client.js 曾被写坏：文件在“同时最多显示”那一行截断，尾部 272 行丢失。原因是之前用 read 工具的分页显示结果重建大文件；read 在 2000 字符处截断了 WHALE_PATH 的长字符串，还在字符串里嵌入了字面的 “.... (line truncated to 2000 chars)”。
 
@@ -728,18 +765,18 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 教训：不要用 read 的分页显示结果重建大文件。需要恢复时，从会话日志里取 write 调用的完整参数，或者用备份；写回后必须跑 node --check 和渲染测试。
 
-### 8.7 发布与部署清单
+### 8.8 发布与部署清单
 
 当前工作副本不是 git 仓库；发布方式是 fork 上游后覆盖上传。推荐流程：
 
 1. 在 fork daha1216/dsh-desktop-notify-win 的克隆目录里，保留上游的 .gitignore、AGENTS.md、docs/agents 等治理文件。
 2. 用工作副本覆盖源码与文档：index.js、client.js、notify.ps1、package.json、README.md、HANDOFF.md、cordis.patch.yml、icon.svg、LICENSE、locale/*.json、lib/*.js。
 3. 不要带 settings.json、notify.log、notify-click.log、client.js.bak-*、node_modules。
-4. git add -A，commit 说明写 BUILD 21：通知文案摘要、常驻宿主、设置页重写、五类事件、历史与抑制。
+4. git add -A，commit 说明写 BUILD 22：点击通知跳转会话、常驻宿主、设置页重写、五类事件、历史与抑制。
 5. git push origin main。
-6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.2、BUILD=21。
+6. 用 gh api 检查 pushed_at 和远端文件哈希；确认远端 package.json version=0.5.3、BUILD=22。
 7. 在 DSH 里更新插件，或执行 dsh plugin --profile desktop add https://github.com/daha1216/dsh-desktop-notify-win。更新后刷新页面。
-8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.2，notify.ps1 是修复后的 BUILD 21 版本；检查日志里 apply 的 version/build/layout/dataDir。
+8. 确认 profile 的 node_modules/dsh-desktop-notify-win/package.json 是 0.5.3，notify.ps1 是 BUILD 22 版本；检查日志里 apply 的 version/build/layout/dataDir。BUILD 22 必须重启 DSH 才能让运行中的 host 插件换成新代码；页面还需要刷新以启动 watchClickedSessions。
 9. 按 7.5 做真机验证。
 10. 回滚方案：把 fork 的 main 指回上一个 commit，重新安装；数据目录保留，配置不会丢。
 
@@ -773,7 +810,7 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 - icon：固定画鲸鱼，不生效。
 - progress、accentWidth：强制关闭。
 - status 的颜色/字号不是独立配置，由 bodySize 派生。
-- 链接文案“点击切回 ›”是硬编码，不能通过设置改。
+- dsh 白卡的链接文案“点击切回会话 ›”是硬编码，不能通过设置改。
 - 关闭热区固定在右上角，不能改位置。
 
 ### 9.4 颜色与语义色
@@ -821,11 +858,11 @@ dsh footer 的“方案 B”：status 非空显示 status，否则显示倒计�
 
 按优先级：
 
-1. BUILD 21 部署后按 7.5 复验设置页、三版式和保存；0.5.1 的三版式 / 保存 / 历史 / 重播 / 前台抑制已在 2026-11-12 验证过，这次重点看通知正文是否为本轮摘要。
+1. 重启 DSH 让 BUILD 22 真正生效，然后按 7.5 复验：设置页显示 v0.5.3 · BUILD 22，点真实卡片能切回并打开对应会话；再确认“只关闭”、dsh 右上 ×、子会话通知三条边界。设置页、三版式、保存、历史/重播、前台抑制已在 2026-11-12 验证过，这次重点是点击跳转。
 2. 决定 dsh footer 的产品语义（9.1）。这是唯一一个“看起来像 bug、实际是设计选择”的点，建议先问用户要状态文案还是要倒计时，再改。
-3. 如果用户要“被替换”也进历史，有两个方案：在宿主 dismissed 回调里通知 service 回写；或者记录 shown 后允许后续 update。当前 renderer-host 只把 dismissed 当事件日志，没有回传 service。
+3. 如果用户要“被替换”也进历史，有两个方案：在宿主 dismissed 回调里通知 service 回写；或者记录 shown 后允许后续 update。BUILD 22 起 renderer-host 已把 dismissed 转给插件，但 handleHostEvent 目前只处理 by=click，replaced/timeout 还没有回写历史。
 4. 多显示器实机测试（9.8）。
-5. 把 _bn21 的 summary 测试整理进 tests/ 并加 npm script；它只依赖 Node 和一个真实会话日志样本，不依赖假 React。旧的 _bn20 临时脚本已清理。
+5. 把 _bn21 的 summary 测试、_bn22 的两条 click 测试整理进 tests/ 并加 npm script；它们只依赖 Node、假 ctx/React 和一个真实会话日志样本。旧的 _bn20 临时脚本已清理。
 6. README 的“红点”措辞已同步成“彩色状态点”；如果改了 9.1，FAQ 也要改。
 
 ---

@@ -146,7 +146,30 @@ export function apply(ctx, rawConfig = {}) {
   const store = new SettingsStore({ paths, log })
   let settings = store.load(rawConfig)
   const history = new HistoryStore(paths.history)
-  const host = getRendererHost({ log, clickLog: paths.clickLog })
+  let clickSeq = 0
+  let lastClick = null
+  let service = null
+
+  function handleHostEvent(message) {
+    try {
+      if (!message || message.evt !== 'dismissed') return
+      if (message.by !== 'click') return
+      if (settings.clickAction === 'none') return
+      const entry = history.get(message.id)
+      const sessionId = (service && service.sessionFor(message.id)) || (entry && entry.agentId) || ''
+      if (!sessionId) {
+        log({ evt: 'click-no-session', id: message.id })
+        return
+      }
+      clickSeq += 1
+      lastClick = { seq: clickSeq, sessionId, id: message.id, at: Date.now() }
+      log({ evt: 'click-session', id: message.id, seq: clickSeq })
+    } catch (error) {
+      log({ evt: 'click-error', message: serializeError(error) })
+    }
+  }
+
+  const host = getRendererHost({ log, clickLog: paths.clickLog, onEvent: handleHostEvent })
 
   function pickPreviewAgent() {
     try {
@@ -170,7 +193,7 @@ export function apply(ctx, rawConfig = {}) {
     }
   }
 
-  const service = new NotificationService({
+  service = new NotificationService({
     settings,
     host,
     history,
@@ -270,6 +293,11 @@ export function apply(ctx, rawConfig = {}) {
           sendJson(res, 200, { history: history.list() })
           return
         }
+        if (route === '/click' && req.method === 'GET') {
+          const click = lastClick && Date.now() - lastClick.at < 60000 ? lastClick : null
+          sendJson(res, 200, { click })
+          return
+        }
         if (route === '/config' && req.method === 'POST') {
           const body = await readBody(req)
           if (body.action === 'save') {
@@ -317,6 +345,7 @@ export function apply(ctx, rawConfig = {}) {
   ctx.effect(() => () => {
     if (startupTimer) clearTimeout(startupTimer)
     watcher.dispatch = null
+    if (host.onEvent === handleHostEvent) host.onEvent = () => {}
     service.dispose()
     resetRendererHost()
   })

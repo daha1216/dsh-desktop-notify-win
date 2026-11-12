@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-notify-win",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "module",
   "description": "Windows desktop notifications for DeepSeek Harness: idle, approval, question and error alerts, with a settings page, live preview and presets.",
   "license": "MIT",
